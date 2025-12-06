@@ -144,41 +144,13 @@ h2, h3 {
   margin: 4px 0 0;
 }
 
-.actions .action-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-button {
-  border: none;
+.actions .auto-notes {
+  color: var(--muted);
+  line-height: 1.6;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
   padding: 12px 14px;
-  font-size: 14px;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  text-align: left;
-  transition: transform 0.08s ease, box-shadow 0.18s ease, background 0.2s ease;
-}
-
-button:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--shadow);
-}
-
-.primary {
-  background: linear-gradient(120deg, var(--accent-2), var(--accent));
-  color: #0b1023;
-  font-weight: 700;
-}
-
-.ghost {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .pill {

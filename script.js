@@ -8,9 +8,17 @@ const ui = {
   log: document.getElementById('log'),
   statusChip: document.getElementById('statusChip'),
   tempo: document.getElementById('tempo'),
+  pomoTimer: document.getElementById('pomoTimer'),
+  pomoStatus: document.getElementById('pomoStatus'),
+  startPauseBtn: document.getElementById('startPause'),
+  resetBtn: document.getElementById('resetPomo'),
+  addFiveBtn: document.getElementById('addFive'),
+  bellBtn: document.getElementById('bellToggle'),
+  notifyBtn: document.getElementById('notifyToggle'),
 };
 
 const STORAGE_KEY = 'idle-cultivation-save-v1';
+const POMODORO_KEY = 'idle-cultivation-pomo-v1';
 
 const state = {
   level: 1,
@@ -37,6 +45,16 @@ const statusClassMap = {
 };
 
 let latestLogEntry = null;
+
+const pomodoro = {
+  mode: 'work',
+  remaining: 25 * 60,
+  running: false,
+  workLength: 25 * 60,
+  breakLength: 5 * 60,
+  soundEnabled: false,
+  notifyEnabled: false,
+};
 
 const workMoodEvents = [
   '遭遇同门欺压，心境受损',
@@ -91,6 +109,11 @@ function formatDetail(entry) {
     return `收入${amounts.join('、')}`;
   }
 
+  if (entry.action === '突破') {
+    const notes = entry.details.map((d) => d.note || '').filter(Boolean);
+    return notes.join('；');
+  }
+
   return entry.details.map((d) => d.note || '').filter(Boolean).join('；');
 }
 
@@ -114,12 +137,13 @@ function addDailyDetail(action, detail) {
 function addMoodEvent(action, text) {
   const entry = ensureLogEntry(action);
   entry.events.push(text);
+  entry.locked = true;
   entry.element.textContent = formatEntryText(entry);
 }
 
 function ensureLogEntry(action) {
   const day = state.tick;
-  if (latestLogEntry && latestLogEntry.action === action) {
+  if (latestLogEntry && latestLogEntry.action === action && !latestLogEntry.locked) {
     latestLogEntry.endDay = day;
     latestLogEntry.element.textContent = formatEntryText(latestLogEntry);
     return latestLogEntry;
@@ -132,6 +156,7 @@ function ensureLogEntry(action) {
     element: document.createElement('div'),
     details: [],
     events: [],
+    locked: false,
   };
   entry.element.className = 'log-entry';
   entry.element.textContent = formatEntryText(entry);
@@ -161,17 +186,41 @@ function saveState() {
       cultivateStreak: state.cultivateStreak,
     })
   );
+
+  localStorage.setItem(
+    POMODORO_KEY,
+    JSON.stringify({
+      mode: pomodoro.mode,
+      remaining: pomodoro.remaining,
+      soundEnabled: pomodoro.soundEnabled,
+      notifyEnabled: pomodoro.notifyEnabled,
+    })
+  );
 }
 
 function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return;
-  try {
-    const data = JSON.parse(raw);
-    Object.assign(state, data);
-    clampXp();
-  } catch (err) {
-    console.warn('Failed to load save', err);
+  if (raw) {
+    try {
+      const data = JSON.parse(raw);
+      Object.assign(state, data);
+      clampXp();
+    } catch (err) {
+      console.warn('Failed to load save', err);
+    }
+  }
+
+  const pomoRaw = localStorage.getItem(POMODORO_KEY);
+  if (pomoRaw) {
+    try {
+      const saved = JSON.parse(pomoRaw);
+      pomodoro.mode = saved.mode || 'work';
+      pomodoro.remaining = saved.remaining || pomodoro.workLength;
+      pomodoro.soundEnabled = Boolean(saved.soundEnabled);
+      pomodoro.notifyEnabled = Boolean(saved.notifyEnabled);
+    } catch (err) {
+      console.warn('Failed to load pomodoro', err);
+    }
   }
 }
 
@@ -195,6 +244,8 @@ function updateUI() {
   const statusClass = statusClassMap[state.activity] || 'cultivate';
   ui.statusChip.className = `status-chip status-${statusClass}`;
   ui.tempo.textContent = `修行节奏：${state.activity === '调心' ? '放缓' : '稳定'}`;
+
+  updatePomodoroUI();
 }
 
 function baseGain() {
@@ -203,6 +254,134 @@ function baseGain() {
   return {
     xp: xpGain * moodBonus,
   };
+}
+
+function formatTime(seconds) {
+  const clamped = Math.max(0, Math.floor(seconds));
+  const m = String(Math.floor(clamped / 60)).padStart(2, '0');
+  const s = String(clamped % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function updatePomodoroUI() {
+  ui.pomoTimer.textContent = formatTime(pomodoro.remaining);
+  ui.pomoStatus.textContent = pomodoro.mode === 'break' ? '休息中' : '专注中';
+
+  if (pomodoro.mode === 'break') {
+    ui.startPauseBtn.textContent = '跳过休息';
+  } else {
+    ui.startPauseBtn.textContent = pomodoro.running ? '暂停' : '开始';
+  }
+
+  ui.bellBtn.classList.toggle('active', pomodoro.soundEnabled);
+  ui.notifyBtn.classList.toggle('active', pomodoro.notifyEnabled);
+}
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.1;
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.4);
+  } catch (err) {
+    console.warn('Beep failed', err);
+  }
+}
+
+function sendNotification() {
+  if (!pomodoro.notifyEnabled || !('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    new Notification('番茄钟完成', { body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注', silent: true });
+  }
+}
+
+function handlePomodoroComplete() {
+  if (pomodoro.soundEnabled) {
+    playBeep();
+  }
+  sendNotification();
+
+  if (pomodoro.mode === 'work') {
+    pomodoro.mode = 'break';
+    pomodoro.remaining = pomodoro.breakLength;
+    pomodoro.running = true;
+  } else {
+    pomodoro.mode = 'work';
+    pomodoro.remaining = pomodoro.workLength;
+    pomodoro.running = false;
+  }
+
+  updatePomodoroUI();
+  saveState();
+}
+
+function pomodoroTick() {
+  if (!pomodoro.running) return;
+  pomodoro.remaining = Math.max(0, pomodoro.remaining - 1);
+  if (pomodoro.remaining === 0) {
+    handlePomodoroComplete();
+  } else {
+    updatePomodoroUI();
+  }
+}
+
+function togglePomodoro() {
+  if (pomodoro.mode === 'break') {
+    skipRest();
+    return;
+  }
+  pomodoro.running = !pomodoro.running;
+  updatePomodoroUI();
+  saveState();
+}
+
+function resetPomodoro() {
+  pomodoro.mode = 'work';
+  pomodoro.running = false;
+  pomodoro.remaining = pomodoro.workLength;
+  updatePomodoroUI();
+  saveState();
+}
+
+function skipRest() {
+  pomodoro.mode = 'work';
+  pomodoro.running = false;
+  pomodoro.remaining = pomodoro.workLength;
+  updatePomodoroUI();
+  saveState();
+}
+
+function addFiveMinutes() {
+  pomodoro.remaining += 5 * 60;
+  updatePomodoroUI();
+  saveState();
+}
+
+function toggleBell() {
+  pomodoro.soundEnabled = !pomodoro.soundEnabled;
+  updatePomodoroUI();
+  saveState();
+}
+
+function toggleNotify() {
+  pomodoro.notifyEnabled = !pomodoro.notifyEnabled;
+  if (pomodoro.notifyEnabled && 'Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then((res) => {
+      if (res !== 'granted') {
+        pomodoro.notifyEnabled = false;
+      }
+      updatePomodoroUI();
+      saveState();
+    });
+  } else {
+    updatePomodoroUI();
+    saveState();
+  }
 }
 
 function startActivity(name, duration) {
@@ -265,7 +444,9 @@ function handleWork(action) {
 
   const isComplete = state.activityProgress >= state.activityDuration;
   const reward = isComplete ? state.pendingWorkReward : 0;
-  addDailyDetail(action, { type: 'stones', amount: reward });
+  if (reward > 0) {
+    addDailyDetail(action, { type: 'stones', amount: reward });
+  }
 
   if (isComplete) {
     state.spiritStones += reward;
@@ -287,7 +468,9 @@ function handleBreakthrough() {
   state.activityProgress += 1;
   state.mood = Math.max(40, state.mood - 1);
   if (state.activityProgress >= state.activityDuration) {
+    const target = formatLevel(state.level + 1);
     levelUp();
+    addDailyDetail('突破', { note: `突破至${target}` });
     startActivity('修行', 0);
   }
 }
@@ -308,7 +491,7 @@ function checkMoodEvents(action, streak) {
   }
 }
 
-function tick() {
+function tickGame() {
   state.tick += 1;
   const dayActivity = state.activity;
   ensureLogEntry(dayActivity);
@@ -358,4 +541,13 @@ function tick() {
 
 loadState();
 updateUI();
-setInterval(tick, 1000);
+ui.startPauseBtn.addEventListener('click', togglePomodoro);
+ui.resetBtn.addEventListener('click', resetPomodoro);
+ui.addFiveBtn.addEventListener('click', addFiveMinutes);
+ui.bellBtn.addEventListener('click', toggleBell);
+ui.notifyBtn.addEventListener('click', toggleNotify);
+
+setInterval(() => {
+  tickGame();
+  pomodoroTick();
+}, 1000);

@@ -191,6 +191,12 @@ h2, h3 {
   border: 1px solid rgba(165, 243, 252, 0.4);
 }
 
+.pill.subtle {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
 .log-panel {
   margin-top: 16px;
 }
@@ -215,6 +221,87 @@ h2, h3 {
 
 .log-entry strong {
   color: var(--text);
+}
+
+.pomodoro {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pomo-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pomo-status {
+  margin: 2px 0 0;
+  color: var(--primary);
+}
+
+.pomo-timer {
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.pomo-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.pomo-controls.secondary {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn.primary {
+  background: linear-gradient(120deg, var(--accent-2), var(--accent));
+  color: #0b1023;
+  border-color: transparent;
+  box-shadow: var(--glow);
+}
+
+.btn.ghost {
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+}
+
+.btn.icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.btn:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.btn.active {
+  border-color: rgba(165, 243, 252, 0.8);
+  color: var(--primary);
+  box-shadow: var(--glow);
 }
 
 @media (max-width: 900px) {

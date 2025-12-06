@@ -87,6 +87,7 @@ function loadState() {
 }
 
 function updateUI() {
+  state.xp = Math.max(0, state.xp);
   ui.level.textContent = formatLevel(state.level);
   ui.xpLabel.textContent = `${state.xp.toFixed(0)} / ${state.xpToNext}`;
   ui.qi.textContent = state.qi.toFixed(0);
@@ -115,7 +116,7 @@ function startActivity(name, duration) {
   state.activityDuration = duration;
   state.activityProgress = 0;
   if (name === '打工') {
-    state.pendingWorkReward = 1.8 + state.level * 0.4;
+    state.pendingWorkReward = Number((1.8 + state.level * 0.4).toFixed(1));
   }
 }
 
@@ -124,8 +125,11 @@ function levelUp() {
   if (state.spiritStones < cost) return;
   state.spiritStones -= cost;
   state.level += 1;
-  state.xp -= state.xpToNext;
+  state.xp = Math.max(0, state.xp - state.xpToNext);
   state.xpToNext = Math.floor(state.xpToNext * 1.18 + state.level * 12);
+  if (state.xp >= state.xpToNext) {
+    state.xp = Math.floor(state.xpToNext * 0.25);
+  }
   state.mood = Math.min(state.mood + 10, 100);
   addLog(`消耗 ${cost} 块灵石突破，达到 <strong>${formatLevel(state.level)}</strong>！心境随之提升。`);
 }

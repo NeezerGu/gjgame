@@ -40,6 +40,12 @@ body {
   margin-bottom: 24px;
 }
 
+.status-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 h1 {
   margin: 8px 0 4px;
   font-size: 36px;
@@ -67,6 +73,16 @@ h1 {
   box-shadow: var(--glow);
   color: var(--primary);
   font-weight: 600;
+}
+
+.version-pill {
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .panel {

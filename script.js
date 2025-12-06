@@ -40,6 +40,8 @@ const DAYS_PER_YEAR = DAYS_PER_MONTH * MONTHS_PER_YEAR;
 const AUTO_LOG_LIMIT = 1000;
 const DEMON_REAL_RATE = 1 / (100 * 24 * 60 * 60); // 100天现实时间一次
 const MAX_TEST_INFO = 8;
+const MAX_ARTIFACTS = 10;
+const TEST_INFO_LIFETIME = 30 * 1000;
 
 let testMode = false;
 
@@ -73,7 +75,7 @@ const state = {
   prevActivity: '修行',
 };
 
-const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
+const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升', '仙'];
 
 const statusClassMap = {
   修行: 'cultivate',
@@ -154,6 +156,42 @@ const demonStories = [
   '尘世羁绊再现，心湖泛起巨浪',
 ];
 
+const artifactIcons = {
+  'breeze-scroll': '📜',
+  'moon-silk': '🌙',
+  'spirit-lantern': '🏮',
+  'jade-leaf': '🍃',
+  'quiet-bead': '🟣',
+  'flowing-ink': '🖋️',
+  'iron-charm': '🧿',
+  'spirit-scale': '🐉',
+  'jade-ring': '💍',
+  'stone-finder': '🔔',
+  'dew-pendant': '💧',
+  'feather-token': '🪶',
+  'mist-robe': '🧥',
+  'ancient-coin': '🪙',
+  'lotus-seed': '🌸',
+  'sun-feather': '☀️',
+  'star-sand': '✨',
+  'jade-bell': '🔔',
+  'echo-shell': '🐚',
+  'violet-charm': '⚡',
+  'earth-ward': '🪨',
+  'mist-bead': '💠',
+  'crane-plume': '🪽',
+  'ember-core': '🔥',
+  'balance-plate': '🪬',
+  'quiet-fan': '🪭',
+  'shadow-step': '🕴️',
+  'soul-lantern': '🕯️',
+  'river-pebble': '🪨',
+  'pine-dew': '🍶',
+  'starry-veil': '🌌',
+  'jade-pendant': '🛡️',
+  'soft-sand': '🏜️',
+};
+
 const artifactPool = [
   { key: 'breeze-scroll', name: '清风玉简', desc: '修炼效率提升10%', effect: { xpBoost: 0.1 } },
   { key: 'moon-silk', name: '月华丝帛', desc: '修炼效率提升6%，心绪更宁静', effect: { xpBoost: 0.06, moodGuard: 0.02 } },
@@ -198,6 +236,17 @@ function hasArtifactFlag(flag) {
   return state.artifacts.some((a) => a.effect[flag]);
 }
 
+function withArtifactMeta(raw) {
+  if (!raw) return raw;
+  const base = artifactPool.find((a) => a.key === raw.key) || raw;
+  return {
+    ...base,
+    ...raw,
+    icon: raw.icon || artifactIcons[raw.key] || artifactIcons[base.key] || '🔮',
+    id: raw.id || `art-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  };
+}
+
 function consumeArtifactFlag(flag) {
   const idx = state.artifacts.findIndex((a) => a.effect[flag]);
   if (idx >= 0) {
@@ -209,19 +258,30 @@ function consumeArtifactFlag(flag) {
 }
 
 function addArtifact(item) {
-  state.artifacts.push(item);
-  addMajor(`获得宝物「${item.name}」`);
+  const artifact = withArtifactMeta(item);
+  if (state.artifacts.length >= MAX_ARTIFACTS) {
+    addMajor(`宝物达到上限，无法获得「${artifact.name}」`);
+    pushTestInfo(`宝物上限，放弃「${artifact.name}」`);
+    return;
+  }
+  state.artifacts.push(artifact);
+  addMajor(`获得宝物「${artifact.name}」`);
 }
 
 function randomArtifact() {
   const idx = Math.floor(Math.random() * artifactPool.length);
-  return { ...artifactPool[idx] };
+  return withArtifactMeta({ ...artifactPool[idx] });
 }
 
 function formatLevel(level) {
-  const realmIndex = Math.min(Math.floor((level - 1) / 10), realmNames.length - 1);
-  const stage = ((level - 1) % 10) + 1;
-  return `${realmNames[realmIndex]}${stage}层`;
+  const realmIndex = Math.floor((level - 1) / 10);
+  const baseRealmCap = realmNames.length - 1;
+  if (realmIndex <= baseRealmCap) {
+    const stage = ((level - 1) % 10) + 1;
+    return `${realmNames[realmIndex]}${stage}层`;
+  }
+  const ascStage = level - baseRealmCap * 10;
+  return `${realmNames[realmNames.length - 1]}${ascStage}层`;
 }
 
 function moodLabel() {
@@ -233,7 +293,8 @@ function moodTier() {
 }
 
 function stonesRequired(level) {
-  return Math.floor(6 + level * 1.6);
+  const ascExtra = Math.max(0, level - realmNames.length * 10) * 0.8;
+  return Math.floor(6 + level * 1.6 + ascExtra);
 }
 
 function dayToDate(dayCount) {
@@ -311,19 +372,34 @@ function renderArtifacts() {
   ui.artifactGrid.innerHTML = '';
   if (!state.artifacts.length) {
     const empty = document.createElement('div');
-    empty.className = 'artifact';
+    empty.className = 'artifact placeholder';
     empty.textContent = '暂无宝物';
     ui.artifactGrid.appendChild(empty);
     return;
   }
   const fragment = document.createDocumentFragment();
-  state.artifacts.slice(-20).forEach((a) => {
+  state.artifacts.slice(0, MAX_ARTIFACTS).forEach((a) => {
     const div = document.createElement('div');
     div.className = 'artifact';
-    div.innerHTML = `<strong>${a.name}</strong><br/>${a.desc}`;
+    div.dataset.id = a.id;
+    div.textContent = a.icon || '🔮';
+    div.title = `${a.name}：${a.desc}`;
     fragment.appendChild(div);
   });
   ui.artifactGrid.appendChild(fragment);
+}
+
+function handleArtifactClick(e) {
+  const card = e.target.closest('.artifact');
+  if (!card || !card.dataset.id) return;
+  const artifact = state.artifacts.find((a) => a.id === card.dataset.id);
+  if (!artifact) return;
+  const ok = confirm(`是否遗弃宝物「${artifact.name}」？`);
+  if (!ok) return;
+  state.artifacts = state.artifacts.filter((a) => a.id !== artifact.id);
+  addMajor(`遗弃宝物「${artifact.name}」`);
+  renderArtifacts();
+  saveState();
 }
 
 function addAutoLogEntry(action) {
@@ -401,6 +477,7 @@ function loadState() {
       if (!Array.isArray(state.autoLogs)) state.autoLogs = [];
       if (!Array.isArray(state.majorLogs)) state.majorLogs = [];
       if (!Array.isArray(state.artifacts)) state.artifacts = [];
+      state.artifacts = state.artifacts.map(withArtifactMeta).slice(0, MAX_ARTIFACTS);
       if (typeof state.lifeDays !== 'number') state.lifeDays = state.totalDays;
       if (!state.prevActivity) state.prevActivity = '修行';
       if (!state.battle) state.battle = null;
@@ -467,20 +544,35 @@ function highlightGear() {
 }
 
 const testMessages = [];
-function pushTestInfo(text) {
+
+function renderTestInfo() {
   if (!ui.testInfo) return;
-  const stamp = new Date().toLocaleTimeString();
-  testMessages.push(`[${stamp}] ${text}`);
-  while (testMessages.length > MAX_TEST_INFO) testMessages.shift();
-  ui.testInfo.textContent = testMessages.join(' | ');
+  const cutoff = Date.now() - TEST_INFO_LIFETIME;
+  while (testMessages.length && testMessages[0].ts < cutoff) {
+    testMessages.shift();
+  }
+  const filtered = testMessages.filter((m) => m.ts >= cutoff);
+  ui.testInfo.textContent = filtered
+    .slice(-MAX_TEST_INFO)
+    .map((m) => `[${m.stamp}] ${m.text}`)
+    .join('\n');
+}
+
+function pushTestInfo(text) {
+  const now = Date.now();
+  const stamp = new Date(now).toLocaleTimeString();
+  testMessages.push({ text, ts: now, stamp });
+  while (testMessages.length > MAX_TEST_INFO * 2) testMessages.shift();
+  renderTestInfo();
 }
 
 function setTestMode(enabled) {
   testMode = enabled;
   if (ui.testPanel) ui.testPanel.classList.toggle('active', enabled);
   if (ui.gearHint) {
-    ui.gearHint.textContent = enabled ? '测试模式已开启' : '测试模式关闭';
-    ui.gearHint.classList.toggle('alert', !enabled);
+    ui.gearHint.textContent = enabled ? '测试模式已开启' : '';
+    ui.gearHint.classList.toggle('hidden', !enabled);
+    ui.gearHint.classList.remove('alert');
   }
 }
 
@@ -560,7 +652,19 @@ function playBeep() {
 function sendNotification() {
   if (!pomodoro.notifyEnabled || !('Notification' in window)) return;
   if (Notification.permission === 'default') {
-    Notification.requestPermission();
+    Notification.requestPermission().then((res) => {
+      if (res === 'granted') {
+        new Notification('番茄钟完成', {
+          body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注',
+          silent: true,
+        });
+      } else {
+        pomodoro.notifyEnabled = false;
+        updatePomodoroUI();
+        saveState();
+      }
+    });
+    return;
   }
   if (Notification.permission === 'granted') {
     new Notification('番茄钟完成', {
@@ -641,23 +745,31 @@ function toggleBell() {
 }
 
 function toggleNotify() {
-  pomodoro.notifyEnabled = !pomodoro.notifyEnabled;
-  if (pomodoro.notifyEnabled && 'Notification' in window) {
+  if (!('Notification' in window)) {
+    pomodoro.notifyEnabled = false;
+    alert('当前浏览器不支持通知');
+    updatePomodoroUI();
+    saveState();
+    return;
+  }
+
+  if (Notification.permission === 'default') {
     Notification.requestPermission().then((res) => {
-      if (res !== 'granted') {
-        pomodoro.notifyEnabled = false;
-      }
+      pomodoro.notifyEnabled = res === 'granted';
       updatePomodoroUI();
       saveState();
     });
-  } else {
-    if (!('Notification' in window)) {
-      pomodoro.notifyEnabled = false;
-      alert('当前浏览器不支持通知');
-    }
-    updatePomodoroUI();
-    saveState();
+    return;
   }
+
+  if (Notification.permission === 'denied') {
+    pomodoro.notifyEnabled = false;
+    alert('通知已被系统拒绝，请在浏览器设置中开启');
+  } else {
+    pomodoro.notifyEnabled = !pomodoro.notifyEnabled;
+  }
+  updatePomodoroUI();
+  saveState();
 }
 
 function startActivity(name, duration) {
@@ -681,7 +793,8 @@ function levelUp() {
   state.spiritStones -= cost;
   state.level += 1;
   state.xp = Math.max(0, state.xp - state.xpToNext);
-  state.xpToNext = Math.floor(state.xpToNext * 1.18 + state.level * 12);
+  const growth = state.level >= realmNames.length * 10 ? 1.22 : 1.18;
+  state.xpToNext = Math.floor(state.xpToNext * growth + state.level * 12);
   if (state.xp >= state.xpToNext) {
     state.xp = Math.floor(state.xpToNext * 0.25);
   }
@@ -784,6 +897,7 @@ function startBattle(enemyLevel, source = '偶遇来敌') {
   if (state.battle) return;
   const playerRealm = Math.floor((state.level - 1) / 10);
   const enemyRealm = Math.floor((enemyLevel - 1) / 10);
+  const displaySource = source.includes('测试') ? '偶遇来敌' : source;
   let winRate = 0.55 + (state.level - enemyLevel) * 0.1;
   if (enemyRealm > playerRealm) winRate = 0;
   if (enemyRealm < playerRealm) winRate = 1;
@@ -803,21 +917,24 @@ function startBattle(enemyLevel, source = '偶遇来敌') {
     winRate,
     remaining: duration,
     realmGap: enemyRealm - playerRealm,
+    label: displaySource,
   };
   startActivity('战斗', duration);
-  addDetail('战斗', { note: `${source}，对手${formatLevel(enemyLevel)}，胜率${Math.round(winRate * 100)}%` });
-  pushTestInfo(
-    `战斗开始，胜率${Math.round(winRate * 100)}%，预计${duration}天 | 赶尽杀绝10%，顿悟概率≈${Math.round(
-      (1 - winRate) * 100
-    )}%`
-  );
+  addDetail('战斗', { note: `${displaySource}，对手${formatLevel(enemyLevel)}，胜率${Math.round(winRate * 100)}%` });
+  if (testMode || source.includes('测试')) {
+    pushTestInfo(
+      `战斗开始，胜率${Math.round(winRate * 100)}%，预计${duration}天 | 赶尽杀绝10%，顿悟概率≈${Math.round(
+        (1 - winRate) * 100
+      )}%`
+    );
+  }
 }
 
 function resolveBattle(win) {
   if (!state.battle) return;
-  const { winRate, enemyLevel, realmGap, source } = state.battle;
+  const { winRate, enemyLevel, realmGap, label } = state.battle;
   if (win) {
-    addMajor(`战胜${formatLevel(enemyLevel)}（${source}）`);
+    addMajor(`战胜${formatLevel(enemyLevel)}${label ? `（${label}）` : ''}`);
     const enlightenChance = Math.max(0, 1 - winRate);
     if (Math.random() < enlightenChance) {
       const days = randRange(100, 300);
@@ -896,7 +1013,7 @@ function checkMoodEvents(action, streak) {
   const guarded = () => Math.random() < artifactBonus('moodGuard');
 
   if (action === '打工' && streak > 0 && streak % 10 === 0) {
-    if (!guarded()) {
+    if (!guarded() && Math.random() < 0.5) {
       state.mood = Math.max(5, state.mood - 10);
       const event = workMoodEvents[Math.floor(Math.random() * workMoodEvents.length)];
       addMoodEvent(action, event);
@@ -1172,6 +1289,7 @@ function setupEvents() {
   ui.addFiveBtn.addEventListener('click', addFiveMinutes);
   ui.bellBtn.addEventListener('click', toggleBell);
   ui.notifyBtn.addEventListener('click', toggleNotify);
+  ui.artifactGrid.addEventListener('click', handleArtifactClick);
   ui.gearGroup.addEventListener('click', handleGearClick);
   ui.demonTest.addEventListener('click', () => {
     if (!testMode) {
@@ -1231,6 +1349,7 @@ setTestMode(false);
 updateUI();
 setupEvents();
 
+setInterval(renderTestInfo, 1000);
 setInterval(() => {
   tickGame(timeScale);
   pomodoroTick(timeScale);

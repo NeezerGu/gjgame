@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>闲云修行记</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">挂机仙侠 • 陪伴模式</p>
+        <h1>闲云修行记</h1>
+        <p class="subtitle">你专心工作学习，角色自成仙道。</p>
+      </div>
+      <div class="status-chip" id="statusChip">后台修行中</div>
+    </header>
+
+    <section class="panel grid">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <p class="label">境界</p>
+            <h2 id="level">练气一层</h2>
+          </div>
+          <div class="pill" id="phase">状态：静心修行</div>
+        </div>
+        <div class="progress-block">
+          <div class="label-row">
+            <span class="label">修为</span>
+            <span class="label" id="xpLabel">0 / 100</span>
+          </div>
+          <div class="progress">
+            <div class="progress-bar" id="xpBar"></div>
+          </div>
+        </div>
+        <div class="stats">
+          <div>
+            <p class="label">灵力</p>
+            <p class="stat" id="qi">0</p>
+          </div>
+          <div>
+            <p class="label">灵石</p>
+            <p class="stat" id="stones">0</p>
+          </div>
+          <div>
+            <p class="label">心境</p>
+            <p class="stat" id="mood">安稳</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card actions">
+        <div class="card-header">
+          <div>
+            <p class="label">修行流程</p>
+            <h3>全自动陪伴</h3>
+          </div>
+        </div>
+        <div class="action-list readonly">
+          <div class="action-row">
+            <div>
+              <p class="label">静心修行</p>
+              <p>持续累积修为与灵力，无需任何操作。</p>
+            </div>
+            <span class="pill">自动</span>
+          </div>
+          <div class="action-row">
+            <div>
+              <p class="label">调理心境</p>
+              <p>心境低落时会自动停顿，专注恢复。</p>
+            </div>
+            <span class="pill">自动</span>
+          </div>
+          <div class="action-row">
+            <div>
+              <p class="label">外出打工</p>
+              <p>突破缺少灵石时会暂停修行，外出赚取灵石。</p>
+            </div>
+            <span class="pill">自动</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="card-header">
+        <div>
+          <p class="label">修行日记</p>
+          <h3>自动记录</h3>
+        </div>
+        <div class="pill" id="tempo">修行节奏：正常</div>
+      </div>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>

@@ -23,6 +23,8 @@ const state = {
   activityDuration: 0,
   activityProgress: 0,
   pendingWorkReward: 0,
+  workStreak: 0,
+  cultivateStreak: 0,
 };
 
 const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
@@ -35,6 +37,18 @@ const statusClassMap = {
 };
 
 let latestLogEntry = null;
+
+const workMoodEvents = [
+  '遭遇同门欺压，心境受损',
+  '长夜加班，身心俱疲，心境震荡',
+  '凡俗纷扰侵蚀道心，心境下沉',
+];
+
+const cultivateMoodEvents = [
+  '闭关多日，烦躁暗生，心境受损',
+  '灵力淤积，念头浮动，心境受损',
+  '思绪杂念扰心，心境受损',
+];
 
 function formatLevel(level) {
   const realmIndex = Math.min(Math.floor((level - 1) / 10), realmNames.length - 1);
@@ -58,12 +72,57 @@ function formatDayRange(entry) {
   return `${range} · ${entry.action}`;
 }
 
-function recordDailyActivity(action) {
+function formatDetail(entry) {
+  if (!entry.details || entry.details.length === 0) return '';
+
+  if (entry.action === '修行') {
+    const amounts = entry.details
+      .filter((d) => d.type === 'xp')
+      .map((d) => `${Math.max(0, Math.round(d.amount))}点`);
+    if (amounts.length === 0) return '';
+    return `修为增长${amounts.join('、')}`;
+  }
+
+  if (entry.action === '打工') {
+    const amounts = entry.details
+      .filter((d) => d.type === 'stones')
+      .map((d) => `${Math.max(0, Math.round(d.amount))}灵石`);
+    if (amounts.length === 0) return '';
+    return `收入${amounts.join('、')}`;
+  }
+
+  return entry.details.map((d) => d.note || '').filter(Boolean).join('；');
+}
+
+function formatEntryText(entry) {
+  const base = formatDayRange(entry);
+  const detail = formatDetail(entry);
+  const events = entry.events && entry.events.length ? entry.events.join('；') : '';
+
+  if (detail && events) return `${base}，${detail}；${events}`;
+  if (detail) return `${base}，${detail}`;
+  if (events) return `${base}；${events}`;
+  return base;
+}
+
+function addDailyDetail(action, detail) {
+  const entry = ensureLogEntry(action);
+  entry.details.push(detail);
+  entry.element.textContent = formatEntryText(entry);
+}
+
+function addMoodEvent(action, text) {
+  const entry = ensureLogEntry(action);
+  entry.events.push(text);
+  entry.element.textContent = formatEntryText(entry);
+}
+
+function ensureLogEntry(action) {
   const day = state.tick;
   if (latestLogEntry && latestLogEntry.action === action) {
     latestLogEntry.endDay = day;
-    latestLogEntry.element.textContent = formatDayRange(latestLogEntry);
-    return;
+    latestLogEntry.element.textContent = formatEntryText(latestLogEntry);
+    return latestLogEntry;
   }
 
   const entry = {
@@ -71,14 +130,17 @@ function recordDailyActivity(action) {
     endDay: day,
     action,
     element: document.createElement('div'),
+    details: [],
+    events: [],
   };
   entry.element.className = 'log-entry';
-  entry.element.textContent = formatDayRange(entry);
+  entry.element.textContent = formatEntryText(entry);
   ui.log.prepend(entry.element);
   while (ui.log.children.length > 80) {
     ui.log.removeChild(ui.log.lastChild);
   }
   latestLogEntry = entry;
+  return entry;
 }
 
 function saveState() {
@@ -95,6 +157,8 @@ function saveState() {
       activityDuration: state.activityDuration,
       activityProgress: state.activityProgress,
       pendingWorkReward: state.pendingWorkReward,
+      workStreak: state.workStreak,
+      cultivateStreak: state.cultivateStreak,
     })
   );
 }
@@ -148,6 +212,12 @@ function startActivity(name, duration) {
   if (name === '打工') {
     state.pendingWorkReward = Number((1.8 + state.level * 0.4).toFixed(1));
   }
+  if (name !== '打工') {
+    state.workStreak = 0;
+  }
+  if (name !== '修行') {
+    state.cultivateStreak = 0;
+  }
 }
 
 function levelUp() {
@@ -163,10 +233,13 @@ function levelUp() {
   state.mood = Math.min(state.mood + 10, 100);
 }
 
-function handleCultivation() {
+function handleCultivation(action) {
   const gains = baseGain();
+  const before = state.xp;
   state.xp += gains.xp;
   clampXp();
+  const delta = Math.max(0, state.xp - before);
+  addDailyDetail(action, { type: 'xp', amount: delta });
 
   if (state.mood < 55) {
     startActivity('调心', 6);
@@ -185,13 +258,17 @@ function handleCultivation() {
   }
 }
 
-function handleWork() {
+function handleWork(action) {
   const fatigue = 1.4;
   state.mood = Math.max(20, state.mood - fatigue);
   state.activityProgress += 1;
 
-  if (state.activityProgress >= state.activityDuration) {
-    state.spiritStones += state.pendingWorkReward;
+  const isComplete = state.activityProgress >= state.activityDuration;
+  const reward = isComplete ? state.pendingWorkReward : 0;
+  addDailyDetail(action, { type: 'stones', amount: reward });
+
+  if (isComplete) {
+    state.spiritStones += reward;
     state.pendingWorkReward = 0;
     startActivity('修行', 0);
   }
@@ -215,22 +292,53 @@ function handleBreakthrough() {
   }
 }
 
+function checkMoodEvents(action, streak) {
+  if (action === '打工' && streak > 0 && streak % 3 === 0) {
+    const drop = 12;
+    state.mood = Math.max(15, state.mood - drop);
+    const event = workMoodEvents[Math.floor(Math.random() * workMoodEvents.length)];
+    addMoodEvent(action, event);
+  }
+
+  if (action === '修行' && streak > 0 && streak % 10 === 0) {
+    const drop = 8;
+    state.mood = Math.max(18, state.mood - drop);
+    const event = cultivateMoodEvents[Math.floor(Math.random() * cultivateMoodEvents.length)];
+    addMoodEvent(action, event);
+  }
+}
+
 function tick() {
   state.tick += 1;
-  recordDailyActivity(state.activity);
-  if (state.activity !== '调心') {
+  const dayActivity = state.activity;
+  ensureLogEntry(dayActivity);
+  if (dayActivity !== '调心') {
     state.mood = Math.max(25, state.mood - 0.25);
   }
 
-  switch (state.activity) {
+  if (dayActivity === '打工') {
+    state.workStreak += 1;
+    state.cultivateStreak = 0;
+  } else if (dayActivity === '修行') {
+    state.cultivateStreak += 1;
+    state.workStreak = 0;
+  } else {
+    state.workStreak = 0;
+    state.cultivateStreak = 0;
+  }
+
+  const streakSnapshot =
+    dayActivity === '打工' ? state.workStreak : dayActivity === '修行' ? state.cultivateStreak : 0;
+
+  switch (dayActivity) {
     case '修行':
-      handleCultivation();
+      handleCultivation(dayActivity);
       break;
     case '调心':
       handleMeditation();
       break;
     case '打工':
-      handleWork();
+      handleWork(dayActivity);
       break;
     case '突破':
       handleBreakthrough();
@@ -238,6 +346,8 @@ function tick() {
     default:
       startActivity('修行', 0);
   }
+
+  checkMoodEvents(dayActivity, streakSnapshot);
 
   clampXp();
   updateUI();

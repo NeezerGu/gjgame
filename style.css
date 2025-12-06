@@ -98,6 +98,11 @@ h1 {
   color: #f9a8d4;
 }
 
+.gear-group {
+  display: flex;
+  gap: 6px;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid rgba(255, 255, 255, 0.05);
@@ -164,7 +169,7 @@ h2, h3 {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 
@@ -272,6 +277,11 @@ h2, h3 {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.btn.tiny {
+  padding: 6px 8px;
+  font-size: 12px;
 }
 
 .btn.primary {

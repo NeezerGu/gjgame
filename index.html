@@ -16,6 +16,13 @@
       </div>
       <div class="status-meta">
         <div class="status-chip" id="statusChip">后台修行中</div>
+        <div class="gear-group" id="gearGroup">
+          <button class="btn tiny" data-gear="1">1x</button>
+          <button class="btn tiny" data-gear="10">10x</button>
+          <button class="btn tiny" data-gear="100">100x</button>
+          <button class="btn tiny" data-gear="1000">1000x</button>
+        </div>
+        <button class="btn ghost tiny" id="demonTest">心魔测试</button>
       </div>
     </header>
 
@@ -38,8 +45,12 @@
         </div>
         <div class="stats">
           <div>
-            <p class="label">天数</p>
-            <p class="stat" id="days">0</p>
+            <p class="label">岁月</p>
+            <p class="stat" id="years">8年0月</p>
+          </div>
+          <div>
+            <p class="label">年龄</p>
+            <p class="stat" id="age">8岁</p>
           </div>
           <div>
             <p class="label">灵石</p>
@@ -53,16 +64,6 @@
       </div>
 
       <div class="card actions">
-        <div class="card-header">
-          <div>
-            <p class="label">全自动</p>
-            <h3>静静陪伴</h3>
-          </div>
-        </div>
-        <div class="auto-notes">
-          <p>角色会自行修行、打工、调心、突破，无需任何点击。</p>
-          <p>关闭页面也会自动存档，下次打开即可继续旅程。</p>
-        </div>
         <div class="pomodoro">
           <div class="pomo-top">
             <div>
@@ -94,6 +95,16 @@
         <div class="pill" id="tempo">修行节奏：稳定</div>
       </div>
       <div class="log" id="log"></div>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="card-header">
+        <div>
+          <p class="label">修行日记</p>
+          <h3>重大事项</h3>
+        </div>
+      </div>
+      <div class="log" id="majorLog"></div>
     </section>
   </div>
   <script src="script.js"></script>

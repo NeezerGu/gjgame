@@ -368,6 +368,23 @@ h2, h3 {
   padding: 6px 8px;
 }
 
+.input {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.input.tiny {
+  width: 88px;
+  padding: 4px 6px;
+}
+
+.caution-row {
+  align-items: center;
+}
+
 .test-info {
   margin-top: 8px;
   color: var(--muted);
@@ -403,8 +420,8 @@ h2, h3 {
 
 .artifact-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(9, minmax(36px, 1fr));
+  gap: 6px;
   margin-top: 10px;
 }
 
@@ -412,9 +429,9 @@ h2, h3 {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
-  padding: 10px 6px;
+  padding: 6px 4px;
   color: var(--text);
-  font-size: 18px;
+  font-size: 16px;
   text-align: center;
   cursor: pointer;
   position: relative;

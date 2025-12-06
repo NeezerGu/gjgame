@@ -27,6 +27,9 @@ const ui = {
   gearHint: document.getElementById('gearHint'),
   artifactGrid: document.getElementById('artifactGrid'),
   tabButtons: document.querySelectorAll('.tab'),
+  cautionInput: document.getElementById('cautionValue'),
+  cautionDeathsInput: document.getElementById('cautionDeaths'),
+  cautionSetBtn: document.getElementById('setCaution'),
 };
 
 const STORAGE_KEY = 'idle-cultivation-save-v2';
@@ -40,8 +43,11 @@ const DAYS_PER_YEAR = DAYS_PER_MONTH * MONTHS_PER_YEAR;
 const AUTO_LOG_LIMIT = 1000;
 const DEMON_REAL_RATE = 1 / (100 * 24 * 60 * 60); // 100天现实时间一次
 const MAX_TEST_INFO = 8;
-const MAX_ARTIFACTS = 10;
+const MAX_ARTIFACTS = 9;
 const TEST_INFO_LIFETIME = 30 * 1000;
+
+const CAUTION_K = 0.03046;
+const CAUTION_ALPHA = 0.493;
 
 let testMode = false;
 
@@ -73,6 +79,8 @@ const state = {
   artifacts: [],
   battle: null,
   prevActivity: '修行',
+  caution: 100,
+  cautionDeaths: 0,
 };
 
 const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升', '仙'];
@@ -284,6 +292,45 @@ function formatLevel(level) {
   return `${realmNames[realmNames.length - 1]}${ascStage}层`;
 }
 
+function cautionFactor() {
+  return Math.max(0, state.caution) / 100;
+}
+
+function cautionIntensity(ageYears) {
+  const bEff = Math.max(ageYears, 1e-6);
+  const x = Math.log(bEff / 100) / Math.log(10);
+  return 1 + 0.3 * Math.tanh(x);
+}
+
+function cautionLambdaBase(times) {
+  if (times <= 0) return 0;
+  const prevPow = times === 1 ? 0 : (times - 1) ** CAUTION_ALPHA;
+  const currPow = times ** CAUTION_ALPHA;
+  const delta = CAUTION_K * (currPow - prevPow);
+  return 1 - Math.exp(-delta);
+}
+
+function cautionStep(ageYears) {
+  const nextTimes = (state.cautionDeaths || 0) + 1;
+  const baseRate = cautionLambdaBase(nextTimes);
+  const rate = baseRate * cautionIntensity(ageYears);
+  const nextValue = Math.max(0, state.caution * (1 - rate));
+  state.cautionDeaths = nextTimes;
+  state.caution = nextValue;
+  addMajor(`谨慎度下降至${nextValue.toFixed(2)}（${nextTimes}次生死历练）`);
+}
+
+function cautiousRoll(prob, onAvoid) {
+  const base = Math.max(0, Math.min(1, prob));
+  const scaled = base * cautionFactor();
+  const roll = Math.random();
+  if (roll < scaled) return true;
+  if (roll < base && typeof onAvoid === 'function') {
+    onAvoid();
+  }
+  return false;
+}
+
 function moodLabel() {
   return moodStages.find((s) => state.mood >= s.min)?.label || moodStages[moodStages.length - 1].label;
 }
@@ -370,22 +417,21 @@ function renderLogs() {
 function renderArtifacts() {
   if (!ui.artifactGrid) return;
   ui.artifactGrid.innerHTML = '';
-  if (!state.artifacts.length) {
-    const empty = document.createElement('div');
-    empty.className = 'artifact placeholder';
-    empty.textContent = '暂无宝物';
-    ui.artifactGrid.appendChild(empty);
-    return;
-  }
   const fragment = document.createDocumentFragment();
-  state.artifacts.slice(0, MAX_ARTIFACTS).forEach((a) => {
+  for (let i = 0; i < MAX_ARTIFACTS; i += 1) {
+    const artifact = state.artifacts[i];
     const div = document.createElement('div');
     div.className = 'artifact';
-    div.dataset.id = a.id;
-    div.textContent = a.icon || '🔮';
-    div.title = `${a.name}：${a.desc}`;
+    if (artifact) {
+      div.dataset.id = artifact.id;
+      div.textContent = artifact.icon || '🔮';
+      div.title = `${artifact.name}：${artifact.desc}`;
+    } else {
+      div.classList.add('placeholder');
+      div.innerHTML = '&nbsp;';
+    }
     fragment.appendChild(div);
-  });
+  }
   ui.artifactGrid.appendChild(fragment);
 }
 
@@ -481,6 +527,8 @@ function loadState() {
       if (typeof state.lifeDays !== 'number') state.lifeDays = state.totalDays;
       if (!state.prevActivity) state.prevActivity = '修行';
       if (!state.battle) state.battle = null;
+      if (typeof state.caution !== 'number') state.caution = 100;
+      if (typeof state.cautionDeaths !== 'number') state.cautionDeaths = 0;
     } catch (err) {
       console.warn('Failed to load save', err);
     }
@@ -533,6 +581,7 @@ function updateUI() {
   renderArtifacts();
   renderLogs();
   highlightGear();
+  syncCautionInputs();
 }
 
 function highlightGear() {
@@ -541,6 +590,11 @@ function highlightGear() {
     const val = Number(btn.dataset.gear);
     btn.classList.toggle('active', val === timeScale);
   });
+}
+
+function syncCautionInputs() {
+  if (ui.cautionInput) ui.cautionInput.value = state.caution.toFixed(2);
+  if (ui.cautionDeathsInput) ui.cautionDeathsInput.value = state.cautionDeaths;
 }
 
 const testMessages = [];
@@ -552,10 +606,13 @@ function renderTestInfo() {
     testMessages.shift();
   }
   const filtered = testMessages.filter((m) => m.ts >= cutoff);
-  ui.testInfo.textContent = filtered
-    .slice(-MAX_TEST_INFO)
-    .map((m) => `[${m.stamp}] ${m.text}`)
-    .join('\n');
+  const lines = [`谨慎度：${state.caution.toFixed(2)}（死亡${state.cautionDeaths}次）`];
+  lines.push(
+    ...filtered
+      .slice(-MAX_TEST_INFO)
+      .map((m) => `[${m.stamp}] ${m.text}`)
+  );
+  ui.testInfo.textContent = lines.join('\n');
 }
 
 function pushTestInfo(text) {
@@ -869,7 +926,7 @@ function handleHealing() {
 function handleNearDeath() {
   state.nearDeathTimer = Math.max(0, state.nearDeathTimer - 1);
   const deathChance = 0.2 / Math.max(1, state.nearDeathTimer + 1);
-  if (Math.random() < deathChance) {
+  if (cautiousRoll(deathChance, () => addMajor('濒死警醒，谨慎避过死亡'))) {
     handleDeath('濒死未撑住，走向死亡');
     return;
   }
@@ -951,18 +1008,31 @@ function resolveBattle(win) {
   const ruthless = Math.random() < 0.1;
   if (ruthless) {
     if (realmGap !== 0) {
-      handleDeath('境界压制，遭对手赶尽杀绝');
+      if (cautiousRoll(1, () => addDetail('战斗', { note: '谨慎防备，避开了赶尽杀绝' }))) {
+        handleDeath('境界压制，遭对手赶尽杀绝');
+      }
       endBattle();
+      startActivity(state.prevActivity || '修行', 0);
       return;
     }
     const escapeChance = Math.min(0.95, winRate + artifactBonus('escapeBoost'));
     if (Math.random() < escapeChance) {
-      state.condition = '受伤';
-      state.healTimer = randRange(30, 180);
-      startActivity('疗伤', state.healTimer);
-      addMajor('拼死逃脱，遍体鳞伤');
-    } else {
+      if (cautiousRoll(1, () => addDetail('战斗', { note: '谨慎退避，避免了重伤' }))) {
+        state.condition = '受伤';
+        state.healTimer = randRange(30, 180);
+        startActivity('疗伤', state.healTimer);
+        addMajor('拼死逃脱，遍体鳞伤');
+      } else {
+        endBattle();
+        startActivity(state.prevActivity || '修行', 0);
+        return;
+      }
+    } else if (cautiousRoll(1, () => addDetail('战斗', { note: '谨慎观察，躲过致命杀招' }))) {
       handleDeath('战败被杀，身死道消');
+    } else {
+      endBattle();
+      startActivity(state.prevActivity || '修行', 0);
+      return;
     }
     endBattle();
     return;
@@ -975,16 +1045,21 @@ function resolveBattle(win) {
     return;
   }
 
-  if (Math.random() < winRate) {
+  if (cautiousRoll(winRate, () => addDetail('战斗', { note: '谨慎撤退，避免受伤' }))) {
     state.condition = '受伤';
     state.healTimer = randRange(30, 180);
     startActivity('疗伤', state.healTimer);
     addMajor('战败受伤，暂避锋芒');
-  } else {
+  } else if (cautiousRoll(1, () => addDetail('战斗', { note: '谨慎护身，未陷入濒死' }))) {
     state.condition = '濒死';
     state.nearDeathTimer = randRange(90, 180);
     startActivity('濒死', state.nearDeathTimer);
     addMajor('战败濒死，垂危挣扎');
+  } else {
+    addDetail('战斗', { note: '危机四伏，但谨慎化险为夷' });
+    endBattle();
+    startActivity(state.prevActivity || '修行', 0);
+    return;
   }
   endBattle();
 }
@@ -1051,6 +1126,9 @@ function maybeEncounterDemon(force = false) {
       addDetail('修行', { type: 'xp', amount: xpGain });
       addMajor('镇魂灯闪耀，化险为夷，修为反增');
     } else {
+      if (!cautiousRoll(1, () => addMajor('戒慎恐惧，避开了心魔反噬'))) {
+        return true;
+      }
       state.condition = '受伤';
       state.healTimer = randRange(30, 180);
       startActivity('疗伤', state.healTimer);
@@ -1064,13 +1142,18 @@ function maybeEncounterDemon(force = false) {
       addDetail('修行', { type: 'xp', amount: xpGain });
       addMajor('镇魂灯护身，反噬化为顿悟');
     } else {
+      if (!cautiousRoll(1, () => addMajor('谨慎自守，避开心魔重创'))) {
+        return true;
+      }
       state.condition = '濒死';
       state.nearDeathTimer = randRange(90, 180);
       startActivity('濒死', state.nearDeathTimer);
       addMajor('心魔重创，濒死挣扎');
     }
   } else {
-    handleDeath('心魔爆发，神魂俱灭');
+    if (cautiousRoll(1, () => addMajor('往昔劫难使其更谨慎，避开心魔绝杀'))) {
+      handleDeath('心魔爆发，神魂俱灭');
+    }
   }
   return true;
 }
@@ -1091,7 +1174,9 @@ function handleFortuity(force = false) {
   const roll = Math.random();
   pushTestInfo(`奇遇触发，roll=${roll.toFixed(2)}`);
   if (roll < 0.01) {
-    handleDeath('天罚突降，魂飞魄散');
+    if (cautiousRoll(1, () => addMajor('谨慎感知天罚征兆，避过一劫'))) {
+      handleDeath('天罚突降，魂飞魄散');
+    }
     return;
   }
   if (roll < 0.31) {
@@ -1110,7 +1195,10 @@ function randRange(min, max) {
 }
 
 function handleMoodCollapse() {
-  if (moodTier() === moodStages.length - 1 && Math.random() < 0.1) {
+  if (
+    moodTier() === moodStages.length - 1 &&
+    cautiousRoll(0.1, () => addMajor('道心崩塌被谨慎压制，侥幸无恙'))
+  ) {
     handleDeath('道心崩塌，气息断绝');
   }
 }
@@ -1130,6 +1218,11 @@ function maybeFindStones(action) {
 
 function handleDeath(reason) {
   addMajor(`死亡：${reason}`);
+  const deathAgeYears = Math.max(1, Math.floor(state.lifeDays / DAYS_PER_YEAR));
+  cautionStep(deathAgeYears);
+  if (state.artifacts.length) {
+    addMajor('身死道消，随身宝物尽失');
+  }
   state.reincarnation += 1;
   const sect = randomSect();
   addMajor(`转生轮回，第${state.reincarnation}世。${sect}弟子将于八岁觉醒记忆。`);
@@ -1155,9 +1248,11 @@ function handleDeath(reason) {
     autoLogs: state.autoLogs,
     majorLogs: state.majorLogs,
     reincarnation: state.reincarnation,
-    artifacts: state.artifacts,
+    artifacts: [],
     battle: null,
     prevActivity: '修行',
+    caution: state.caution,
+    cautionDeaths: state.cautionDeaths,
   });
   initialStory(sect);
 }
@@ -1257,6 +1352,28 @@ function handleGearClick(e) {
   saveState();
 }
 
+function handleSetCaution() {
+  if (!testMode) {
+    alert('请在控制台输入 testmode("password") 开启测试模式');
+    return;
+  }
+  if (ui.cautionInput) {
+    const val = Number(ui.cautionInput.value);
+    if (Number.isFinite(val)) {
+      state.caution = Math.max(0, Math.min(100, val));
+    }
+  }
+  if (ui.cautionDeathsInput) {
+    const deaths = Number(ui.cautionDeathsInput.value);
+    if (Number.isFinite(deaths)) {
+      state.cautionDeaths = Math.max(0, Math.floor(deaths));
+    }
+  }
+  pushTestInfo(`手动设定谨慎度为${state.caution.toFixed(2)}，死亡次数${state.cautionDeaths}`);
+  renderTestInfo();
+  saveState();
+}
+
 function enforceSingleWindow() {
   const existingRaw = localStorage.getItem(WINDOW_KEY);
   if (existingRaw) {
@@ -1291,6 +1408,7 @@ function setupEvents() {
   ui.notifyBtn.addEventListener('click', toggleNotify);
   ui.artifactGrid.addEventListener('click', handleArtifactClick);
   ui.gearGroup.addEventListener('click', handleGearClick);
+  ui.cautionSetBtn.addEventListener('click', handleSetCaution);
   ui.demonTest.addEventListener('click', () => {
     if (!testMode) {
       alert('请在控制台输入 testmode("password") 开启测试模式');

@@ -8,6 +8,39 @@
 </head>
 <body>
   <div class="app">
+    <section class="test-panel" id="testPanel">
+      <div class="test-row">
+        <div class="gear-group" id="gearGroup">
+          <button class="btn tiny" data-gear="1">1x</button>
+          <button class="btn tiny" data-gear="10">10x</button>
+          <button class="btn tiny" data-gear="100">100x</button>
+          <button class="btn tiny" data-gear="1000">1000x</button>
+        </div>
+        <button class="btn ghost tiny" id="demonTest">心魔测试</button>
+        <div class="battle-test">
+          <label class="label" for="battleDiff">敌人差值</label>
+          <select id="battleDiff">
+            <option value="-5">-5</option>
+            <option value="-4">-4</option>
+            <option value="-3">-3</option>
+            <option value="-2">-2</option>
+            <option value="-1">-1</option>
+            <option value="0" selected>0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+          </select>
+          <button class="btn ghost tiny" id="battleTest">遇敌测试</button>
+        </div>
+        <button class="btn ghost tiny" id="fortuneTest">奇遇测试</button>
+      </div>
+      <div class="test-info" id="testInfo"></div>
+    </section>
+
+    <hr class="test-divider" />
+
     <header class="hero">
       <div>
         <p class="eyebrow">挂机仙侠 • 陪伴模式</p>
@@ -16,13 +49,7 @@
       </div>
       <div class="status-meta">
         <div class="status-chip" id="statusChip">后台修行中</div>
-        <div class="gear-group" id="gearGroup">
-          <button class="btn tiny" data-gear="1">1x</button>
-          <button class="btn tiny" data-gear="10">10x</button>
-          <button class="btn tiny" data-gear="100">100x</button>
-          <button class="btn tiny" data-gear="1000">1000x</button>
-        </div>
-        <button class="btn ghost tiny" id="demonTest">心魔测试</button>
+        <div class="pill" id="gearHint">测试模式关闭</div>
       </div>
     </header>
 
@@ -61,6 +88,10 @@
             <p class="stat" id="mood">安稳</p>
           </div>
         </div>
+        <div class="artifact-block">
+          <p class="label">宝物</p>
+          <div class="artifact-grid" id="artifactGrid"></div>
+        </div>
       </div>
 
       <div class="card actions">
@@ -68,7 +99,7 @@
           <div class="pomo-top">
             <div>
               <p class="label">番茄钟</p>
-              <h3 class="pomo-status" id="pomoStatus">专注中</h3>
+              <h3 class="pomo-status" id="pomoStatus">未使用</h3>
             </div>
             <div class="pill subtle">25分钟专注 · 5分钟休息</div>
           </div>
@@ -80,31 +111,22 @@
           </div>
           <div class="pomo-controls secondary">
             <button class="btn icon" id="bellToggle">🔔 响铃</button>
-            <button class="btn icon" id="notifyToggle">🔔 提醒</button>
+            <button class="btn icon alt" id="notifyToggle">💬 通知</button>
           </div>
         </div>
       </div>
     </section>
 
     <section class="panel log-panel">
-      <div class="card-header">
-        <div>
-          <p class="label">修行日记</p>
-          <h3>自动记录</h3>
+      <div class="card-header log-tabs">
+        <div class="tab-buttons">
+          <button class="tab active" data-tab="auto">自动记录</button>
+          <button class="tab" data-tab="major">重大事项</button>
         </div>
         <div class="pill" id="tempo">修行节奏：稳定</div>
       </div>
       <div class="log" id="log"></div>
-    </section>
-
-    <section class="panel log-panel">
-      <div class="card-header">
-        <div>
-          <p class="label">修行日记</p>
-          <h3>重大事项</h3>
-        </div>
-      </div>
-      <div class="log" id="majorLog"></div>
+      <div class="log hidden" id="majorLog"></div>
     </section>
   </div>
   <script src="script.js"></script>

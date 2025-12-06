@@ -19,6 +19,14 @@ const ui = {
   notifyBtn: document.getElementById('notifyToggle'),
   gearGroup: document.getElementById('gearGroup'),
   demonTest: document.getElementById('demonTest'),
+  battleDiff: document.getElementById('battleDiff'),
+  battleTest: document.getElementById('battleTest'),
+  fortuneTest: document.getElementById('fortuneTest'),
+  testInfo: document.getElementById('testInfo'),
+  testPanel: document.getElementById('testPanel'),
+  gearHint: document.getElementById('gearHint'),
+  artifactGrid: document.getElementById('artifactGrid'),
+  tabButtons: document.querySelectorAll('.tab'),
 };
 
 const STORAGE_KEY = 'idle-cultivation-save-v2';
@@ -30,6 +38,10 @@ const DAYS_PER_MONTH = 30;
 const MONTHS_PER_YEAR = 12;
 const DAYS_PER_YEAR = DAYS_PER_MONTH * MONTHS_PER_YEAR;
 const AUTO_LOG_LIMIT = 1000;
+const DEMON_REAL_RATE = 1 / (100 * 24 * 60 * 60); // 100天现实时间一次
+const MAX_TEST_INFO = 8;
+
+let testMode = false;
 
 let windowId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 let allowRun = true;
@@ -43,6 +55,7 @@ const state = {
   spiritStones: 0,
   mood: 70,
   totalDays: START_AGE_YEARS * DAYS_PER_YEAR,
+  lifeDays: START_AGE_YEARS * DAYS_PER_YEAR,
   activity: '修行',
   activityDuration: 0,
   activityProgress: 0,
@@ -55,6 +68,9 @@ const state = {
   autoLogs: [],
   majorLogs: [],
   reincarnation: 0,
+  artifacts: [],
+  battle: null,
+  prevActivity: '修行',
 };
 
 const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
@@ -66,6 +82,7 @@ const statusClassMap = {
   突破: 'break',
   疗伤: 'mood',
   濒死: 'break',
+  战斗: 'battle',
 };
 
 const moodStages = [
@@ -81,16 +98,54 @@ const moodStages = [
   { min: 0, label: '道心崩塌' },
 ];
 
-const workMoodEvents = [
-  '遭遇同门欺压，心境受损',
-  '长夜加班，身心俱疲，心境震荡',
-  '凡俗纷扰侵蚀道心，心境下沉',
-];
+const workMoodEvents = (() => {
+  const fronts = [
+    '遭遇同门欺压',
+    '凡俗琐事纠缠',
+    '任务被临时加码',
+    '长夜加班',
+    '灵石被克扣',
+    '同伴冷嘲热讽',
+    '被凡人上司斥责',
+    '赶路迟到被罚',
+    '恶劣天气出勤',
+    '灵兽干扰劳作',
+    '器材损坏重工',
+    '同门争功抢赏',
+    '凡俗吵闹不休',
+    '灵气稀薄耗时',
+    '搬运重物劳损',
+    '被迫处理杂务',
+    '账目对不上数',
+    '坊市纠纷缠身',
+    '误食辛辣之物',
+    '舟车劳顿奔波',
+  ];
+  const tails = [
+    '心神抽离，道心蒙尘',
+    '精神透支，心境震荡',
+    '心绪烦闷，意志受挫',
+    '心湖泛起涟漪，意志摇晃',
+    '心火滋生，浮躁难安',
+  ];
+  const list = [];
+  fronts.forEach((f) => {
+    tails.forEach((t) => {
+      list.push(`${f}，${t}`);
+    });
+  });
+  while (list.length < 110) {
+    list.push(`劳役反复，${tails[list.length % tails.length]}`);
+  }
+  return list;
+})();
 
 const cultivateMoodEvents = [
   '闭关多日，烦躁暗生，心境受损',
   '灵力淤积，念头浮动，心境受损',
   '思绪杂念扰心，心境受损',
+  '心神难静，灵光蒙尘',
+  '丹田胀痛，意志受损',
 ];
 
 const demonStories = [
@@ -98,6 +153,70 @@ const demonStories = [
   '旧日执念凝成魔影，直扑识海',
   '尘世羁绊再现，心湖泛起巨浪',
 ];
+
+const artifactPool = [
+  { key: 'breeze-scroll', name: '清风玉简', desc: '修炼效率提升10%', effect: { xpBoost: 0.1 } },
+  { key: 'moon-silk', name: '月华丝帛', desc: '修炼效率提升6%，心绪更宁静', effect: { xpBoost: 0.06, moodGuard: 0.02 } },
+  { key: 'spirit-lantern', name: '灵光灯', desc: '修炼效率提升15%', effect: { xpBoost: 0.15 } },
+  { key: 'jade-leaf', name: '翠玉叶', desc: '10%概率免疫心境受损', effect: { moodGuard: 0.1 } },
+  { key: 'quiet-bead', name: '静心珠', desc: '15%概率免疫心境受损', effect: { moodGuard: 0.15 } },
+  { key: 'flowing-ink', name: '流霞墨', desc: '修炼效率提升8%，战斗胜率提升5%', effect: { xpBoost: 0.08, battleBoost: 0.05 } },
+  { key: 'iron-charm', name: '玄铁符', desc: '战斗胜率提升10%', effect: { battleBoost: 0.1 } },
+  { key: 'spirit-scale', name: '灵鳞护符', desc: '战斗胜率提升6%，10%概率免疫心境受损', effect: { battleBoost: 0.06, moodGuard: 0.1 } },
+  { key: 'jade-ring', name: '扶风玉环', desc: '修炼效率提升12%', effect: { xpBoost: 0.12 } },
+  { key: 'stone-finder', name: '寻石铃', desc: '每日10%概率额外发现1枚灵石', effect: { stoneLuck: 0.1 } },
+  { key: 'dew-pendant', name: '晨露坠', desc: '每日5%概率额外发现2枚灵石', effect: { stoneLuck: 0.05, stoneValue: 2 } },
+  { key: 'feather-token', name: '灵羽令', desc: '战斗胜率提升8%', effect: { battleBoost: 0.08 } },
+  { key: 'mist-robe', name: '雾岚衣', desc: '修炼效率提升5%，战斗胜率提升3%', effect: { xpBoost: 0.05, battleBoost: 0.03 } },
+  { key: 'ancient-coin', name: '古铜钱', desc: '心境波动减缓，5%概率免疫心境受损', effect: { moodGuard: 0.05 } },
+  { key: 'lotus-seed', name: '青莲子', desc: '修炼效率提升9%，心境平稳', effect: { xpBoost: 0.09, moodGuard: 0.04 } },
+  { key: 'sun-feather', name: '朝阳羽', desc: '战斗胜率提升12%', effect: { battleBoost: 0.12 } },
+  { key: 'star-sand', name: '星辰砂', desc: '修炼效率提升7%，战斗胜率提升4%', effect: { xpBoost: 0.07, battleBoost: 0.04 } },
+  { key: 'jade-bell', name: '寒玉铃', desc: '10%概率免疫心境受损，战斗胜率提升2%', effect: { moodGuard: 0.1, battleBoost: 0.02 } },
+  { key: 'echo-shell', name: '回音螺', desc: '每日8%概率额外发现灵石', effect: { stoneLuck: 0.08 } },
+  { key: 'violet-charm', name: '紫电符', desc: '战斗胜率提升15%，但略显锋锐', effect: { battleBoost: 0.15 } },
+  { key: 'earth-ward', name: '厚土符', desc: '修炼效率提升4%，战斗胜率提升6%', effect: { xpBoost: 0.04, battleBoost: 0.06 } },
+  { key: 'mist-bead', name: '幻雾珠', desc: '心境防护15%，偶有灵石入袋', effect: { moodGuard: 0.15, stoneLuck: 0.03 } },
+  { key: 'crane-plume', name: '仙鹤羽', desc: '修炼效率提升11%', effect: { xpBoost: 0.11 } },
+  { key: 'ember-core', name: '余烬火核', desc: '战斗胜率提升7%，修炼效率提升5%', effect: { battleBoost: 0.07, xpBoost: 0.05 } },
+  { key: 'balance-plate', name: '衡心石盘', desc: '20%概率免疫心境受损', effect: { moodGuard: 0.2 } },
+  { key: 'quiet-fan', name: '清风扇', desc: '修炼效率提升6%，战斗胜率提升4%', effect: { xpBoost: 0.06, battleBoost: 0.04 } },
+  { key: 'shadow-step', name: '影行符', desc: '战斗胜率提升5%，逃生几率稍高', effect: { battleBoost: 0.05, escapeBoost: 0.05 } },
+  { key: 'soul-lantern', name: '镇魂灯', desc: '心魔劫可替死一次', effect: { demonSave: true } },
+  { key: 'river-pebble', name: '溪灵石', desc: '修炼效率提升3%，心境更柔和', effect: { xpBoost: 0.03, moodGuard: 0.03 } },
+  { key: 'pine-dew', name: '松露清酿', desc: '修炼效率提升10%，偶有灵石', effect: { xpBoost: 0.1, stoneLuck: 0.04 } },
+  { key: 'starry-veil', name: '星雾纱', desc: '战斗胜率提升9%，心境波动减弱', effect: { battleBoost: 0.09, moodGuard: 0.06 } },
+  { key: 'jade-pendant', name: '护身玉坠', desc: '战斗胜率提升6%，逃跑概率+5%', effect: { battleBoost: 0.06, escapeBoost: 0.05 } },
+  { key: 'soft-sand', name: '软金砂', desc: '修炼效率提升13%', effect: { xpBoost: 0.13 } },
+];
+
+function artifactBonus(type) {
+  return state.artifacts.reduce((sum, a) => sum + (a.effect[type] || 0), 0);
+}
+
+function hasArtifactFlag(flag) {
+  return state.artifacts.some((a) => a.effect[flag]);
+}
+
+function consumeArtifactFlag(flag) {
+  const idx = state.artifacts.findIndex((a) => a.effect[flag]);
+  if (idx >= 0) {
+    const [item] = state.artifacts.splice(idx, 1);
+    pushTestInfo(`宝物消耗：${item.name}`);
+    return item;
+  }
+  return null;
+}
+
+function addArtifact(item) {
+  state.artifacts.push(item);
+  addMajor(`获得宝物「${item.name}」`);
+}
+
+function randomArtifact() {
+  const idx = Math.floor(Math.random() * artifactPool.length);
+  return { ...artifactPool[idx] };
+}
 
 function formatLevel(level) {
   const realmIndex = Math.min(Math.floor((level - 1) / 10), realmNames.length - 1);
@@ -187,6 +306,26 @@ function renderLogs() {
   ui.majorLog.appendChild(majorFragment);
 }
 
+function renderArtifacts() {
+  if (!ui.artifactGrid) return;
+  ui.artifactGrid.innerHTML = '';
+  if (!state.artifacts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'artifact';
+    empty.textContent = '暂无宝物';
+    ui.artifactGrid.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  state.artifacts.slice(-20).forEach((a) => {
+    const div = document.createElement('div');
+    div.className = 'artifact';
+    div.innerHTML = `<strong>${a.name}</strong><br/>${a.desc}`;
+    fragment.appendChild(div);
+  });
+  ui.artifactGrid.appendChild(fragment);
+}
+
 function addAutoLogEntry(action) {
   const day = Math.floor(state.totalDays);
   const last = latestLogEntry;
@@ -216,6 +355,18 @@ function addMoodEvent(action, text) {
 
 function addMajor(text) {
   state.majorLogs.push({ day: Math.floor(state.totalDays), text });
+  const entry = {
+    startDay: Math.floor(state.totalDays),
+    endDay: Math.floor(state.totalDays),
+    action: '重大事项',
+    details: [{ note: text }],
+    events: [],
+    locked: true,
+  };
+  state.autoLogs.push(entry);
+  if (state.autoLogs.length > AUTO_LOG_LIMIT) {
+    state.autoLogs.splice(0, state.autoLogs.length - AUTO_LOG_LIMIT);
+  }
 }
 
 function saveState() {
@@ -249,6 +400,10 @@ function loadState() {
       latestLogEntry = last || null;
       if (!Array.isArray(state.autoLogs)) state.autoLogs = [];
       if (!Array.isArray(state.majorLogs)) state.majorLogs = [];
+      if (!Array.isArray(state.artifacts)) state.artifacts = [];
+      if (typeof state.lifeDays !== 'number') state.lifeDays = state.totalDays;
+      if (!state.prevActivity) state.prevActivity = '修行';
+      if (!state.battle) state.battle = null;
     } catch (err) {
       console.warn('Failed to load save', err);
     }
@@ -285,7 +440,7 @@ function updateUI() {
 
   const currentDate = dayToDate(Math.floor(state.totalDays));
   ui.years.textContent = `${currentDate.year}年${currentDate.month}月`;
-  ui.age.textContent = `${Math.max(0, Math.floor(state.totalDays / DAYS_PER_YEAR))}岁`;
+  ui.age.textContent = `${Math.max(0, Math.floor(state.lifeDays / DAYS_PER_YEAR))}岁`;
   ui.stones.textContent = state.spiritStones.toFixed(0);
   ui.mood.textContent = moodLabel();
 
@@ -298,6 +453,7 @@ function updateUI() {
   ui.tempo.textContent = `修行节奏：${state.activity === '调心' ? '放缓' : '稳定'}`;
 
   updatePomodoroUI();
+  renderArtifacts();
   renderLogs();
   highlightGear();
 }
@@ -310,10 +466,47 @@ function highlightGear() {
   });
 }
 
+const testMessages = [];
+function pushTestInfo(text) {
+  if (!ui.testInfo) return;
+  const stamp = new Date().toLocaleTimeString();
+  testMessages.push(`[${stamp}] ${text}`);
+  while (testMessages.length > MAX_TEST_INFO) testMessages.shift();
+  ui.testInfo.textContent = testMessages.join(' | ');
+}
+
+function setTestMode(enabled) {
+  testMode = enabled;
+  if (ui.testPanel) ui.testPanel.classList.toggle('active', enabled);
+  if (ui.gearHint) {
+    ui.gearHint.textContent = enabled ? '测试模式已开启' : '测试模式关闭';
+    ui.gearHint.classList.toggle('alert', !enabled);
+  }
+}
+
+window.testmode = function (pwd) {
+  if (pwd === 'password') {
+    setTestMode(true);
+    pushTestInfo('测试模式开启');
+    return 'OK';
+  }
+  pushTestInfo('密码错误');
+  return '密码错误';
+};
+
+function switchLogTab(target) {
+  ui.tabButtons.forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.tab === target);
+  });
+  ui.log.classList.toggle('hidden', target === 'major');
+  ui.majorLog.classList.toggle('hidden', target !== 'major');
+}
+
 function baseGain() {
   const moodBonus = 0.85 + (state.mood - 60) / 90;
   const xpGain = 8 + state.level * 0.8;
-  return { xp: xpGain * moodBonus };
+  const artifactBoost = 1 + artifactBonus('xpBoost');
+  return { xp: xpGain * moodBonus * artifactBoost };
 }
 
 function formatTime(seconds) {
@@ -335,7 +528,8 @@ const pomodoro = {
 
 function updatePomodoroUI() {
   ui.pomoTimer.textContent = formatTime(pomodoro.remaining);
-  ui.pomoStatus.textContent = pomodoro.mode === 'break' ? '休息中' : '专注中';
+  const idle = !pomodoro.running && pomodoro.mode === 'work' && pomodoro.remaining === pomodoro.workLength;
+  ui.pomoStatus.textContent = idle ? '未使用' : pomodoro.mode === 'break' ? '休息中' : '专注中';
 
   if (pomodoro.mode === 'break') {
     ui.startPauseBtn.textContent = '跳过休息';
@@ -365,8 +559,14 @@ function playBeep() {
 
 function sendNotification() {
   if (!pomodoro.notifyEnabled || !('Notification' in window)) return;
+  if (Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
   if (Notification.permission === 'granted') {
-    new Notification('番茄钟完成', { body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注', silent: true });
+    new Notification('番茄钟完成', {
+      body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注',
+      silent: true,
+    });
   }
 }
 
@@ -384,6 +584,7 @@ function handlePomodoroComplete() {
     pomodoro.mode = 'work';
     pomodoro.remaining = pomodoro.workLength;
     pomodoro.running = false;
+    handleFortuity();
   }
 
   updatePomodoroUI();
@@ -441,7 +642,7 @@ function toggleBell() {
 
 function toggleNotify() {
   pomodoro.notifyEnabled = !pomodoro.notifyEnabled;
-  if (pomodoro.notifyEnabled && 'Notification' in window && Notification.permission === 'default') {
+  if (pomodoro.notifyEnabled && 'Notification' in window) {
     Notification.requestPermission().then((res) => {
       if (res !== 'granted') {
         pomodoro.notifyEnabled = false;
@@ -450,6 +651,10 @@ function toggleNotify() {
       saveState();
     });
   } else {
+    if (!('Notification' in window)) {
+      pomodoro.notifyEnabled = false;
+      alert('当前浏览器不支持通知');
+    }
     updatePomodoroUI();
     saveState();
   }
@@ -575,23 +780,141 @@ function handleBreakthrough() {
   }
 }
 
+function startBattle(enemyLevel, source = '偶遇来敌') {
+  if (state.battle) return;
+  const playerRealm = Math.floor((state.level - 1) / 10);
+  const enemyRealm = Math.floor((enemyLevel - 1) / 10);
+  let winRate = 0.55 + (state.level - enemyLevel) * 0.1;
+  if (enemyRealm > playerRealm) winRate = 0;
+  if (enemyRealm < playerRealm) winRate = 1;
+  const boost = artifactBonus('battleBoost');
+  winRate += winRate * boost;
+  winRate = Math.max(0.02, Math.min(0.98, winRate));
+
+  const closeness = Math.max(1, Math.abs(state.level - enemyLevel));
+  const avg = (state.level + enemyLevel) / 2;
+  const durationBase = (closeness < 2 ? 32 : 14) * (avg / 10 + 1);
+  const duration = Math.max(1, Math.min(320, Math.round(durationBase / Math.max(1, closeness / 2))));
+
+  state.prevActivity = state.activity;
+  state.battle = {
+    enemyLevel,
+    source,
+    winRate,
+    remaining: duration,
+    realmGap: enemyRealm - playerRealm,
+  };
+  startActivity('战斗', duration);
+  addDetail('战斗', { note: `${source}，对手${formatLevel(enemyLevel)}，胜率${Math.round(winRate * 100)}%` });
+  pushTestInfo(
+    `战斗开始，胜率${Math.round(winRate * 100)}%，预计${duration}天 | 赶尽杀绝10%，顿悟概率≈${Math.round(
+      (1 - winRate) * 100
+    )}%`
+  );
+}
+
+function resolveBattle(win) {
+  if (!state.battle) return;
+  const { winRate, enemyLevel, realmGap, source } = state.battle;
+  if (win) {
+    addMajor(`战胜${formatLevel(enemyLevel)}（${source}）`);
+    const enlightenChance = Math.max(0, 1 - winRate);
+    if (Math.random() < enlightenChance) {
+      const days = randRange(100, 300);
+      const gain = Math.min(baseGain().xp * days, state.xpToNext - state.xp);
+      state.xp += gain;
+      addDetail('战斗', { note: `战后顿悟，等同修炼${days}天` });
+      addMajor('战后顿悟，修为精进');
+    }
+    endBattle();
+    startActivity('修行', 0);
+    return;
+  }
+
+  const ruthless = Math.random() < 0.1;
+  if (ruthless) {
+    if (realmGap !== 0) {
+      handleDeath('境界压制，遭对手赶尽杀绝');
+      endBattle();
+      return;
+    }
+    const escapeChance = Math.min(0.95, winRate + artifactBonus('escapeBoost'));
+    if (Math.random() < escapeChance) {
+      state.condition = '受伤';
+      state.healTimer = randRange(30, 180);
+      startActivity('疗伤', state.healTimer);
+      addMajor('拼死逃脱，遍体鳞伤');
+    } else {
+      handleDeath('战败被杀，身死道消');
+    }
+    endBattle();
+    return;
+  }
+
+  if (Math.random() < winRate) {
+    addDetail('战斗', { note: '落败但全身而退' });
+    endBattle();
+    startActivity(state.prevActivity || '修行', 0);
+    return;
+  }
+
+  if (Math.random() < winRate) {
+    state.condition = '受伤';
+    state.healTimer = randRange(30, 180);
+    startActivity('疗伤', state.healTimer);
+    addMajor('战败受伤，暂避锋芒');
+  } else {
+    state.condition = '濒死';
+    state.nearDeathTimer = randRange(90, 180);
+    startActivity('濒死', state.nearDeathTimer);
+    addMajor('战败濒死，垂危挣扎');
+  }
+  endBattle();
+}
+
+function handleBattle() {
+  if (!state.battle) {
+    startActivity('修行', 0);
+    return;
+  }
+  state.battle.remaining = Math.max(0, state.battle.remaining - 1);
+  state.activityProgress += 1;
+  if (state.battle.remaining <= 0) {
+    const win = Math.random() < state.battle.winRate;
+    resolveBattle(win);
+  }
+}
+
+function endBattle() {
+  state.battle = null;
+  state.activity = '修行';
+  state.activityDuration = 0;
+  state.activityProgress = 0;
+}
+
 function checkMoodEvents(action, streak) {
-  if (action === '打工' && streak > 0 && streak % 3 === 0) {
-    state.mood = Math.max(5, state.mood - 12);
-    const event = workMoodEvents[Math.floor(Math.random() * workMoodEvents.length)];
-    addMoodEvent(action, event);
+  const guarded = () => Math.random() < artifactBonus('moodGuard');
+
+  if (action === '打工' && streak > 0 && streak % 10 === 0) {
+    if (!guarded()) {
+      state.mood = Math.max(5, state.mood - 10);
+      const event = workMoodEvents[Math.floor(Math.random() * workMoodEvents.length)];
+      addMoodEvent(action, event);
+    }
   }
 
   if (action === '修行' && streak > 0 && streak % 10 === 0) {
-    state.mood = Math.max(5, state.mood - 8);
-    const event = cultivateMoodEvents[Math.floor(Math.random() * cultivateMoodEvents.length)];
-    addMoodEvent(action, event);
+    if (!guarded()) {
+      state.mood = Math.max(5, state.mood - 8);
+      const event = cultivateMoodEvents[Math.floor(Math.random() * cultivateMoodEvents.length)];
+      addMoodEvent(action, event);
+    }
   }
 }
 
 function maybeEncounterDemon(force = false) {
   if (state.condition !== '正常') return false;
-  const chance = force ? 1 : 0.01;
+  const chance = force ? 1 : DEMON_REAL_RATE / Math.max(1, timeScale);
   if (!force && Math.random() > chance) return false;
   const story = demonStories[Math.floor(Math.random() * demonStories.length)];
   addMajor(`心魔来袭：${story}`);
@@ -604,19 +927,65 @@ function maybeEncounterDemon(force = false) {
     addDetail('修行', { type: 'xp', amount: xpGain });
     addMajor('历经心魔，心神更凝，修为大增');
   } else if (roll < 0.25) {
-    state.condition = '受伤';
-    state.healTimer = randRange(30, 180);
-    startActivity('疗伤', state.healTimer);
-    addMajor('心魔反噬，受伤闭关疗养');
+    if (consumeArtifactFlag('demonSave')) {
+      const xpGain = Math.min(baseGain().xp * 360, state.xpToNext - state.xp);
+      state.xp += xpGain;
+      clampXp();
+      addDetail('修行', { type: 'xp', amount: xpGain });
+      addMajor('镇魂灯闪耀，化险为夷，修为反增');
+    } else {
+      state.condition = '受伤';
+      state.healTimer = randRange(30, 180);
+      startActivity('疗伤', state.healTimer);
+      addMajor('心魔反噬，受伤闭关疗养');
+    }
   } else if (roll < 0.6) {
-    state.condition = '濒死';
-    state.nearDeathTimer = randRange(90, 180);
-    startActivity('濒死', state.nearDeathTimer);
-    addMajor('心魔重创，濒死挣扎');
+    if (consumeArtifactFlag('demonSave')) {
+      const xpGain = Math.min(baseGain().xp * 360, state.xpToNext - state.xp);
+      state.xp += xpGain;
+      clampXp();
+      addDetail('修行', { type: 'xp', amount: xpGain });
+      addMajor('镇魂灯护身，反噬化为顿悟');
+    } else {
+      state.condition = '濒死';
+      state.nearDeathTimer = randRange(90, 180);
+      startActivity('濒死', state.nearDeathTimer);
+      addMajor('心魔重创，濒死挣扎');
+    }
   } else {
     handleDeath('心魔爆发，神魂俱灭');
   }
   return true;
+}
+
+function triggerFortuityBattle() {
+  const diff = randRange(-2, 3);
+  const enemyLevel = Math.max(1, state.level + diff);
+  const engageChance = diff > 0 ? 0.35 : 0.75;
+  if (Math.random() < engageChance) {
+    startBattle(enemyLevel, '奇遇试探');
+  } else {
+    addMajor('奇遇对峙后双方退让，无战事');
+  }
+}
+
+function handleFortuity(force = false) {
+  if (!force && Math.random() >= 0.1) return;
+  const roll = Math.random();
+  pushTestInfo(`奇遇触发，roll=${roll.toFixed(2)}`);
+  if (roll < 0.01) {
+    handleDeath('天罚突降，魂飞魄散');
+    return;
+  }
+  if (roll < 0.31) {
+    const item = randomArtifact();
+    addArtifact(item);
+    if (Math.random() < 0.1) {
+      triggerFortuityBattle();
+    }
+    return;
+  }
+  addMajor('小有奇遇，但风平浪静，未起波澜');
 }
 
 function randRange(min, max) {
@@ -629,19 +998,34 @@ function handleMoodCollapse() {
   }
 }
 
+function maybeFindStones(action) {
+  const chance = artifactBonus('stoneLuck');
+  if (!chance) return;
+  const values = state.artifacts
+    .map((a) => (a.effect.stoneValue ? a.effect.stoneValue : 0))
+    .filter((v) => v > 0);
+  const value = values.length ? Math.max(...values) : 1;
+  if (Math.random() < chance) {
+    state.spiritStones += value;
+    addDetail(action, { type: 'stones', amount: value });
+  }
+}
+
 function handleDeath(reason) {
   addMajor(`死亡：${reason}`);
   state.reincarnation += 1;
   const sect = randomSect();
   addMajor(`转生轮回，第${state.reincarnation}世。${sect}弟子将于八岁觉醒记忆。`);
   latestLogEntry = null;
+  const keepTotal = state.totalDays;
   Object.assign(state, {
     level: 1,
     xp: 0,
     xpToNext: 100,
     spiritStones: 0,
     mood: 70,
-    totalDays: START_AGE_YEARS * DAYS_PER_YEAR,
+    totalDays: keepTotal,
+    lifeDays: START_AGE_YEARS * DAYS_PER_YEAR,
     activity: '修行',
     activityDuration: 0,
     activityProgress: 0,
@@ -654,6 +1038,9 @@ function handleDeath(reason) {
     autoLogs: state.autoLogs,
     majorLogs: state.majorLogs,
     reincarnation: state.reincarnation,
+    artifacts: state.artifacts,
+    battle: null,
+    prevActivity: '修行',
   });
   initialStory(sect);
 }
@@ -672,6 +1059,7 @@ function initialStory(sectName) {
 
 function tickDay() {
   state.totalDays += 1;
+  state.lifeDays += 1;
   const dayActivity = state.activity;
   addAutoLogEntry(dayActivity);
 
@@ -712,10 +1100,14 @@ function tickDay() {
     case '濒死':
       handleNearDeath();
       break;
+    case '战斗':
+      handleBattle();
+      break;
     default:
       startActivity('修行', 0);
   }
 
+  maybeFindStones(dayActivity);
   checkMoodEvents(dayActivity, streakSnapshot);
   if (moodTier() >= moodStages.length - 2 && !['疗伤', '濒死'].includes(state.activity)) {
     startActivity('调心', 8);
@@ -739,6 +1131,10 @@ function tickGame(deltaDays) {
 function handleGearClick(e) {
   const val = Number(e.target.dataset.gear);
   if (!val) return;
+  if (!testMode) {
+    alert('请在控制台输入 testmode("password") 开启测试模式');
+    return;
+  }
   timeScale = val;
   highlightGear();
   saveState();
@@ -778,9 +1174,36 @@ function setupEvents() {
   ui.notifyBtn.addEventListener('click', toggleNotify);
   ui.gearGroup.addEventListener('click', handleGearClick);
   ui.demonTest.addEventListener('click', () => {
+    if (!testMode) {
+      alert('请在控制台输入 testmode("password") 开启测试模式');
+      return;
+    }
     maybeEncounterDemon(true);
     updateUI();
     saveState();
+  });
+
+  ui.battleTest.addEventListener('click', () => {
+    if (!testMode) {
+      alert('请在控制台输入 testmode("password") 开启测试模式');
+      return;
+    }
+    const diff = Number(ui.battleDiff.value) || 0;
+    const enemyLevel = Math.max(1, state.level + diff);
+    startBattle(enemyLevel, '测试遇敌');
+    updateUI();
+  });
+
+  ui.fortuneTest.addEventListener('click', () => {
+    if (!testMode) {
+      alert('请在控制台输入 testmode("password") 开启测试模式');
+      return;
+    }
+    handleFortuity(true);
+  });
+
+  ui.tabButtons.forEach((btn) => {
+    btn.addEventListener('click', () => switchLogTab(btn.dataset.tab));
   });
 
   window.addEventListener('storage', (e) => {
@@ -804,6 +1227,7 @@ if (state.majorLogs.length === 0) {
   initialStory(randomSect());
 }
 enforceSingleWindow();
+setTestMode(false);
 updateUI();
 setupEvents();
 

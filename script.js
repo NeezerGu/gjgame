@@ -23,6 +23,7 @@ const state = {
   activity: '修行',
   activityDuration: 0,
   activityProgress: 0,
+  pendingWorkReward: 0,
 };
 
 const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
@@ -68,6 +69,7 @@ function saveState() {
       activity: state.activity,
       activityDuration: state.activityDuration,
       activityProgress: state.activityProgress,
+      pendingWorkReward: state.pendingWorkReward,
     })
   );
 }
@@ -112,6 +114,9 @@ function startActivity(name, duration) {
   state.activity = name;
   state.activityDuration = duration;
   state.activityProgress = 0;
+  if (name === '打工') {
+    state.pendingWorkReward = 1.8 + state.level * 0.4;
+  }
 }
 
 function levelUp() {
@@ -151,15 +156,15 @@ function handleCultivation() {
 }
 
 function handleWork() {
-  const stonesGain = 1.8 + state.level * 0.4;
   const fatigue = 1.4;
-  state.spiritStones += stonesGain;
   state.mood = Math.max(20, state.mood - fatigue);
   state.qi += 1.2;
   state.activityProgress += 1;
 
   if (state.activityProgress >= state.activityDuration) {
-    addLog(`一番忙碌赚得 ${stonesGain.toFixed(1)} 块灵石，稍作休整继续修行。`);
+    state.spiritStones += state.pendingWorkReward;
+    addLog(`一番忙碌赚得 ${state.pendingWorkReward.toFixed(1)} 块灵石，稍作休整继续修行。`);
+    state.pendingWorkReward = 0;
     startActivity('修行', 0);
   }
 }
@@ -205,10 +210,6 @@ function tick() {
       break;
     default:
       startActivity('修行', 0);
-  }
-
-  while (state.xp >= state.xpToNext && state.spiritStones >= stonesRequired(state.level)) {
-    levelUp();
   }
 
   updateUI();

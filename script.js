@@ -80,10 +80,16 @@ function loadState() {
   try {
     const data = JSON.parse(raw);
     Object.assign(state, data);
+    clampXp();
     addLog('读取到上次的修行状态，继续前缘。');
   } catch (err) {
     console.warn('Failed to load save', err);
   }
+}
+
+function clampXp() {
+  const maxXp = Math.max(state.xpToNext, 1);
+  state.xp = Math.min(Math.max(0, state.xp), maxXp);
 }
 
 function updateUI() {
@@ -138,6 +144,7 @@ function handleCultivation() {
   const gains = baseGain();
   state.xp += gains.xp;
   state.qi += gains.qi;
+  clampXp();
 
   if (state.mood < 55) {
     addLog('心绪渐躁，角色自动开始调息平复心境。');
@@ -216,6 +223,7 @@ function tick() {
       startActivity('修行', 0);
   }
 
+  clampXp();
   updateUI();
   if (state.tick % 5 === 0) {
     saveState();

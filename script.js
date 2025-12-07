@@ -30,6 +30,7 @@ const ui = {
   cautionInput: document.getElementById('cautionValue'),
   cautionDeathsInput: document.getElementById('cautionDeaths'),
   cautionSetBtn: document.getElementById('setCaution'),
+  resetAllBtn: document.getElementById('resetAll'),
 };
 
 const STORAGE_KEY = 'idle-cultivation-save-v2';
@@ -366,8 +367,9 @@ function formatEntry(entry) {
   const time = formatRange(entry.startDay, entry.endDay);
   const detailText = formatDetail(entry);
   const events = entry.events && entry.events.length ? entry.events.join('；') : '';
-  if (detailText && events) return `${time} · ${entry.action}，${detailText}；${events}`;
-  if (detailText) return `${time} · ${entry.action}，${detailText}`;
+  const actionSep = entry.action === '重大事项' ? '：' : '，';
+  if (detailText && events) return `${time} · ${entry.action}${actionSep}${detailText}；${events}`;
+  if (detailText) return `${time} · ${entry.action}${actionSep}${detailText}`;
   if (events) return `${time} · ${entry.action}；${events}`;
   return `${time} · ${entry.action}`;
 }
@@ -565,7 +567,8 @@ function updateUI() {
 
   const currentDate = dayToDate(Math.floor(state.totalDays));
   ui.years.textContent = `${currentDate.year}年${currentDate.month}月`;
-  ui.age.textContent = `${Math.max(0, Math.floor(state.lifeDays / DAYS_PER_YEAR))}岁`;
+  const ageYears = Math.max(0, Math.floor(state.lifeDays / DAYS_PER_YEAR));
+  ui.age.textContent = `第${state.reincarnation + 1}世 ${ageYears}岁`;
   ui.stones.textContent = state.spiritStones.toFixed(0);
   ui.mood.textContent = moodLabel();
 
@@ -593,8 +596,12 @@ function highlightGear() {
 }
 
 function syncCautionInputs() {
-  if (ui.cautionInput) ui.cautionInput.value = state.caution.toFixed(2);
-  if (ui.cautionDeathsInput) ui.cautionDeathsInput.value = state.cautionDeaths;
+  if (ui.cautionInput && document.activeElement !== ui.cautionInput) {
+    ui.cautionInput.value = state.caution.toFixed(2);
+  }
+  if (ui.cautionDeathsInput && document.activeElement !== ui.cautionDeathsInput) {
+    ui.cautionDeathsInput.value = state.cautionDeaths;
+  }
 }
 
 const testMessages = [];
@@ -950,8 +957,11 @@ function handleBreakthrough() {
   }
 }
 
-function startBattle(enemyLevel, source = '偶遇来敌') {
-  if (state.battle) return;
+function startBattle(enemyLevel, source = '偶遇来敌', { force = false } = {}) {
+  if (state.battle) {
+    if (!force) return false;
+    endBattle();
+  }
   const playerRealm = Math.floor((state.level - 1) / 10);
   const enemyRealm = Math.floor((enemyLevel - 1) / 10);
   const displaySource = source.includes('测试') ? '偶遇来敌' : source;
@@ -985,6 +995,7 @@ function startBattle(enemyLevel, source = '偶遇来敌') {
       )}%`
     );
   }
+  return true;
 }
 
 function resolveBattle(win) {
@@ -1374,6 +1385,66 @@ function handleSetCaution() {
   saveState();
 }
 
+function resetAll() {
+  latestLogEntry = null;
+  timeScale = 1;
+  allowRun = true;
+  testMessages.length = 0;
+  Object.assign(state, {
+    level: 1,
+    xp: 0,
+    xpToNext: 100,
+    spiritStones: 0,
+    mood: 70,
+    totalDays: START_AGE_YEARS * DAYS_PER_YEAR,
+    lifeDays: START_AGE_YEARS * DAYS_PER_YEAR,
+    activity: '修行',
+    activityDuration: 0,
+    activityProgress: 0,
+    pendingWorkReward: 0,
+    workStreak: 0,
+    cultivateStreak: 0,
+    condition: '正常',
+    healTimer: 0,
+    nearDeathTimer: 0,
+    autoLogs: [],
+    majorLogs: [],
+    reincarnation: 0,
+    artifacts: [],
+    battle: null,
+    prevActivity: '修行',
+    caution: 100,
+    cautionDeaths: 0,
+  });
+
+  pomodoro.mode = 'work';
+  pomodoro.running = false;
+  pomodoro.remaining = pomodoro.workLength;
+  pomodoro.soundEnabled = false;
+  pomodoro.notifyEnabled = false;
+
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(POMODORO_KEY);
+  localStorage.removeItem('idle-cultivation-gear');
+  localStorage.removeItem(WINDOW_KEY);
+
+  initialStory(randomSect());
+  highlightGear();
+  renderTestInfo();
+  updateUI();
+  saveState();
+  pushTestInfo('已重置全部数据');
+}
+
+function handleResetAll() {
+  if (!testMode) {
+    alert('请在控制台输入 testmode("password") 开启测试模式');
+    return;
+  }
+  if (!confirm('确认重置所有数据并重新开始？')) return;
+  resetAll();
+}
+
 function enforceSingleWindow() {
   const existingRaw = localStorage.getItem(WINDOW_KEY);
   if (existingRaw) {
@@ -1409,6 +1480,7 @@ function setupEvents() {
   ui.artifactGrid.addEventListener('click', handleArtifactClick);
   ui.gearGroup.addEventListener('click', handleGearClick);
   ui.cautionSetBtn.addEventListener('click', handleSetCaution);
+  ui.resetAllBtn.addEventListener('click', handleResetAll);
   ui.demonTest.addEventListener('click', () => {
     if (!testMode) {
       alert('请在控制台输入 testmode("password") 开启测试模式');
@@ -1426,7 +1498,10 @@ function setupEvents() {
     }
     const diff = Number(ui.battleDiff.value) || 0;
     const enemyLevel = Math.max(1, state.level + diff);
-    startBattle(enemyLevel, '测试遇敌');
+    const started = startBattle(enemyLevel, '测试遇敌', { force: true });
+    if (!started) {
+      pushTestInfo('遇敌测试未能启动');
+    }
     updateUI();
   });
 

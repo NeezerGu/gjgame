@@ -50,6 +50,14 @@ const TEST_INFO_LIFETIME = 30 * 1000;
 const CAUTION_K = 0.03046;
 const CAUTION_ALPHA = 0.493;
 
+const BASE_EXP = 3772;
+const GROW_RATE = 1.08;
+const BASE_GAIN_PRE = 10;
+const BASE_GAIN_XIAN = 20;
+
+const realmOrder = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
+const TOTAL_PRE_LEVELS = realmOrder.reduce((sum, name) => sum + (name === '飞升' ? 1 : 10), 0);
+
 let testMode = false;
 
 let windowId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -60,7 +68,7 @@ let timeScale = 1;
 const state = {
   level: 1,
   xp: 0,
-  xpToNext: 100,
+  xpToNext: BASE_EXP,
   spiritStones: 0,
   mood: 70,
   totalDays: START_AGE_YEARS * DAYS_PER_YEAR,
@@ -83,8 +91,6 @@ const state = {
   caution: 100,
   cautionDeaths: 0,
 };
-
-const realmNames = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升', '仙'];
 
 const statusClassMap = {
   修行: 'cultivate',
@@ -260,7 +266,7 @@ function consumeArtifactFlag(flag) {
   const idx = state.artifacts.findIndex((a) => a.effect[flag]);
   if (idx >= 0) {
     const [item] = state.artifacts.splice(idx, 1);
-    pushTestInfo(`宝物消耗：${item.name}`);
+    pushTestInfo(`天道灵宝消耗：${item.name}`);
     return item;
   }
   return null;
@@ -269,12 +275,12 @@ function consumeArtifactFlag(flag) {
 function addArtifact(item) {
   const artifact = withArtifactMeta(item);
   if (state.artifacts.length >= MAX_ARTIFACTS) {
-    addMajor(`宝物达到上限，无法获得「${artifact.name}」`);
-    pushTestInfo(`宝物上限，放弃「${artifact.name}」`);
+    addMajor(`天道灵宝达到上限，无法获得「${artifact.name}」`);
+    pushTestInfo(`天道灵宝上限，放弃「${artifact.name}」`);
     return;
   }
   state.artifacts.push(artifact);
-  addMajor(`获得宝物「${artifact.name}」`);
+  addMajor(`获得天道灵宝「${artifact.name}」`);
 }
 
 function randomArtifact() {
@@ -282,15 +288,42 @@ function randomArtifact() {
   return withArtifactMeta({ ...artifactPool[idx] });
 }
 
-function formatLevel(level) {
-  const realmIndex = Math.floor((level - 1) / 10);
-  const baseRealmCap = realmNames.length - 1;
-  if (realmIndex <= baseRealmCap) {
-    const stage = ((level - 1) % 10) + 1;
-    return `${realmNames[realmIndex]}${stage}层`;
+function levelToRealmStage(level) {
+  const safeLevel = Math.max(1, Math.floor(level));
+  let idx = safeLevel;
+  for (const realm of realmOrder) {
+    const maxStage = realm === '飞升' ? 1 : 10;
+    if (idx <= maxStage) return { realm, stage: idx };
+    idx -= maxStage;
   }
-  const ascStage = level - baseRealmCap * 10;
-  return `${realmNames[realmNames.length - 1]}${ascStage}层`;
+  return { realm: '仙', stage: idx };
+}
+
+function needExpPre(level) {
+  return Math.round(BASE_EXP * GROW_RATE ** (level - 1));
+}
+
+const R_FLY = needExpPre(TOTAL_PRE_LEVELS);
+
+function needExpXian(n) {
+  return Math.round(R_FLY * (1 + n));
+}
+
+function requiredXp(level) {
+  if (level <= TOTAL_PRE_LEVELS) return needExpPre(level);
+  const stage = level - TOTAL_PRE_LEVELS;
+  return needExpXian(stage);
+}
+
+function gainPerSecond(realm) {
+  return realm === '仙' ? BASE_GAIN_XIAN : BASE_GAIN_PRE;
+}
+
+function formatLevel(level) {
+  const { realm, stage } = levelToRealmStage(level);
+  if (realm === '飞升') return '飞升';
+  if (realm === '仙') return `仙${stage}层`;
+  return `${realm}${stage}层`;
 }
 
 function cautionFactor() {
@@ -341,7 +374,7 @@ function moodTier() {
 }
 
 function stonesRequired(level) {
-  const ascExtra = Math.max(0, level - realmNames.length * 10) * 0.8;
+  const ascExtra = Math.max(0, level - TOTAL_PRE_LEVELS) * 0.8;
   return Math.floor(6 + level * 1.6 + ascExtra);
 }
 
@@ -382,9 +415,13 @@ function formatDetail(entry) {
     return `修为增长${amounts.join('、')}`;
   }
   if (entry.action === '打工') {
-    const amounts = entry.details.filter((d) => d.type === 'stones' && d.amount > 0).map((d) => `${Math.max(0, Math.round(d.amount))}灵石`);
-    if (amounts.length === 0) return '';
-    return `收入${amounts.join('、')}`;
+    const amounts = entry.details
+      .filter((d) => d.type === 'stones' && d.amount > 0)
+      .map((d) => `${Math.max(0, Math.round(d.amount))}灵石`);
+    const notes = entry.details.map((d) => d.note || '').filter(Boolean);
+    if (amounts.length && notes.length) return `收入${amounts.join('、')}；${notes.join('；')}`;
+    if (amounts.length) return `收入${amounts.join('、')}`;
+    return notes.join('；');
   }
   if (entry.action === '突破') {
     const notes = entry.details.map((d) => d.note || '').filter(Boolean);
@@ -442,10 +479,10 @@ function handleArtifactClick(e) {
   if (!card || !card.dataset.id) return;
   const artifact = state.artifacts.find((a) => a.id === card.dataset.id);
   if (!artifact) return;
-  const ok = confirm(`是否遗弃宝物「${artifact.name}」？`);
+  const ok = confirm(`是否遗弃天道灵宝「${artifact.name}」？`);
   if (!ok) return;
   state.artifacts = state.artifacts.filter((a) => a.id !== artifact.id);
-  addMajor(`遗弃宝物「${artifact.name}」`);
+  addMajor(`遗弃天道灵宝「${artifact.name}」`);
   renderArtifacts();
   saveState();
 }
@@ -531,6 +568,7 @@ function loadState() {
       if (!state.battle) state.battle = null;
       if (typeof state.caution !== 'number') state.caution = 100;
       if (typeof state.cautionDeaths !== 'number') state.cautionDeaths = 0;
+      state.xpToNext = requiredXp(state.level);
     } catch (err) {
       console.warn('Failed to load save', err);
     }
@@ -556,6 +594,7 @@ function loadState() {
 }
 
 function clampXp() {
+  state.xpToNext = requiredXp(state.level);
   const maxXp = Math.max(state.xpToNext, 1);
   state.xp = Math.min(Math.max(0, state.xp), maxXp);
 }
@@ -660,7 +699,8 @@ function switchLogTab(target) {
 
 function baseGain() {
   const moodBonus = 0.85 + (state.mood - 60) / 90;
-  const xpGain = 8 + state.level * 0.8;
+  const { realm } = levelToRealmStage(state.level);
+  const xpGain = gainPerSecond(realm);
   const artifactBoost = 1 + artifactBonus('xpBoost');
   return { xp: xpGain * moodBonus * artifactBoost };
 }
@@ -853,12 +893,12 @@ function startActivity(name, duration) {
 
 function levelUp() {
   const cost = stonesRequired(state.level);
-  if (state.spiritStones < cost) return;
+  if (state.spiritStones < cost || state.xp < state.xpToNext) return;
   state.spiritStones -= cost;
+  const spentXp = state.xpToNext;
   state.level += 1;
-  state.xp = Math.max(0, state.xp - state.xpToNext);
-  const growth = state.level >= realmNames.length * 10 ? 1.22 : 1.18;
-  state.xpToNext = Math.floor(state.xpToNext * growth + state.level * 12);
+  state.xp = Math.max(0, state.xp - spentXp);
+  state.xpToNext = requiredXp(state.level);
   if (state.xp >= state.xpToNext) {
     state.xp = Math.floor(state.xpToNext * 0.25);
   }
@@ -893,20 +933,27 @@ function handleCultivation(action) {
   }
 }
 
+function settleWork(reason) {
+  const portion = state.activityDuration ? Math.min(1, state.activityProgress / state.activityDuration) : 0;
+  const reward = Number((state.pendingWorkReward * portion).toFixed(1));
+  if (reward > 0 || reason) {
+    addDetail('打工', { type: reward > 0 ? 'stones' : undefined, amount: reward, note: reason });
+  }
+  if (reward > 0) {
+    state.spiritStones += reward;
+  }
+  state.pendingWorkReward = 0;
+}
+
 function handleWork(action) {
   const fatigue = 1.6;
   state.mood = Math.max(5, state.mood - fatigue);
   state.activityProgress += 1;
 
   const isComplete = state.activityProgress >= state.activityDuration;
-  const reward = isComplete ? state.pendingWorkReward : 0;
-  if (reward > 0) {
-    addDetail(action, { type: 'stones', amount: reward });
-  }
-
   if (isComplete) {
-    state.spiritStones += reward;
-    state.pendingWorkReward = 0;
+    state.activityProgress = Math.min(state.activityProgress, state.activityDuration);
+    settleWork();
     startActivity('修行', 0);
   }
 }
@@ -1232,7 +1279,7 @@ function handleDeath(reason) {
   const deathAgeYears = Math.max(1, Math.floor(state.lifeDays / DAYS_PER_YEAR));
   cautionStep(deathAgeYears);
   if (state.artifacts.length) {
-    addMajor('身死道消，随身宝物尽失');
+    addMajor('身死道消，随身天道灵宝散去');
   }
   state.reincarnation += 1;
   const sect = randomSect();
@@ -1242,7 +1289,7 @@ function handleDeath(reason) {
   Object.assign(state, {
     level: 1,
     xp: 0,
-    xpToNext: 100,
+    xpToNext: BASE_EXP,
     spiritStones: 0,
     mood: 70,
     totalDays: keepTotal,
@@ -1332,7 +1379,11 @@ function tickDay() {
 
   maybeFindStones(dayActivity);
   checkMoodEvents(dayActivity, streakSnapshot);
-  if (moodTier() >= moodStages.length - 2 && !['疗伤', '濒死'].includes(state.activity)) {
+  const tier = moodTier();
+  if (dayActivity === '打工' && state.activity === '打工' && tier >= moodStages.length - 3) {
+    settleWork('心境不稳，提前结算灵石');
+    startActivity('调心', 8);
+  } else if (tier >= moodStages.length - 2 && !['疗伤', '濒死'].includes(state.activity)) {
     startActivity('调心', 8);
   }
   handleMoodCollapse();
@@ -1393,7 +1444,7 @@ function resetAll() {
   Object.assign(state, {
     level: 1,
     xp: 0,
-    xpToNext: 100,
+    xpToNext: BASE_EXP,
     spiritStones: 0,
     mood: 70,
     totalDays: START_AGE_YEARS * DAYS_PER_YEAR,

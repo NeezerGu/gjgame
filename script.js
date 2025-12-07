@@ -50,10 +50,34 @@ const TEST_INFO_LIFETIME = 30 * 1000;
 const CAUTION_K = 0.03046;
 const CAUTION_ALPHA = 0.493;
 
-const BASE_EXP = 3772;
-const GROW_RATE = 1.08;
-const BASE_GAIN_PRE = 10;
-const BASE_GAIN_XIAN = 20;
+const REALM_CULTIVATE_GAIN = {
+  练气: 10,
+  筑基: 20,
+  结丹: 30,
+  元婴: 40,
+  化神: 60,
+  炼虚: 80,
+  合体: 120,
+  大乘: 160,
+  渡劫: 220,
+  飞升: 300,
+  仙: 300,
+};
+
+const LEVEL_NEED_EXP = {
+  练气: [3450, 6900, 10350, 13800, 17250, 20710, 24160, 27610, 31060, 34510],
+  筑基: [7960, 15930, 23890, 31850, 39820, 47780, 55750, 63710, 71670, 79640],
+  结丹: [25880, 51760, 77650, 103530, 129410, 155290, 181170, 207050, 232940, 258820],
+  元婴: [39820, 79640, 119450, 159270, 199090, 238910, 278730, 318550, 358360, 398180],
+  化神: [159270, 318550, 477820, 637090, 796360, 955640, 1114910, 1274180, 1433450, 1592730],
+  炼虚: [371640, 743270, 1114910, 1486550, 1858180, 2229820, 2601450, 2973090, 3344730, 3716360],
+  合体: [1194550, 2389090, 3583640, 4778180, 5972730, 7167270, 8361820, 9556360, 10750910, 11945450],
+  大乘: [3185450, 6370910, 9556360, 12741820, 15927270, 19112730, 22298180, 25483640, 28669090, 31854550],
+  渡劫: [8760000, 17520000, 26280000, 35040000, 43800000, 52560000, 61320000, 70080000, 78840000, 87600000],
+};
+
+const FLY_EXP = 242076000;
+const XIAN_BASE_EXP = 484152000;
 
 const realmOrder = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
 const TOTAL_PRE_LEVELS = realmOrder.reduce((sum, name) => sum + (name === '飞升' ? 1 : 10), 0);
@@ -68,7 +92,7 @@ let timeScale = 1;
 const state = {
   level: 1,
   xp: 0,
-  xpToNext: BASE_EXP,
+  xpToNext: LEVEL_NEED_EXP['练气'][0],
   spiritStones: 0,
   mood: 70,
   totalDays: START_AGE_YEARS * DAYS_PER_YEAR,
@@ -90,6 +114,7 @@ const state = {
   prevActivity: '修行',
   caution: 100,
   cautionDeaths: 0,
+  levelRepeats: { 1: 1 },
 };
 
 const statusClassMap = {
@@ -299,24 +324,41 @@ function levelToRealmStage(level) {
   return { realm: '仙', stage: idx };
 }
 
-function needExpPre(level) {
-  return Math.round(BASE_EXP * GROW_RATE ** (level - 1));
-}
-
-const R_FLY = needExpPre(TOTAL_PRE_LEVELS);
-
-function needExpXian(n) {
-  return Math.round(R_FLY * (1 + n));
-}
-
 function requiredXp(level) {
-  if (level <= TOTAL_PRE_LEVELS) return needExpPre(level);
-  const stage = level - TOTAL_PRE_LEVELS;
-  return needExpXian(stage);
+  const { realm, stage } = levelToRealmStage(level);
+  if (LEVEL_NEED_EXP[realm]) {
+    const arr = LEVEL_NEED_EXP[realm];
+    return arr[Math.min(arr.length - 1, Math.max(0, stage - 1))];
+  }
+  if (realm === '飞升') return FLY_EXP;
+  if (realm === '仙') return Math.round(XIAN_BASE_EXP * (1 + 0.05 * Math.max(0, stage - 1)));
+  return LEVEL_NEED_EXP['渡劫'][LEVEL_NEED_EXP['渡劫'].length - 1];
+}
+
+function levelRepeatCount(level) {
+  if (!state.levelRepeats) state.levelRepeats = { 1: 1 };
+  return state.levelRepeats[level] || 0;
+}
+
+function registerLevelEntry(level) {
+  if (!state.levelRepeats) state.levelRepeats = {};
+  state.levelRepeats[level] = (state.levelRepeats[level] || 0) + 1;
+}
+
+function ensureLevelEntry(level) {
+  if (!state.levelRepeats) state.levelRepeats = {};
+  if (!state.levelRepeats[level]) state.levelRepeats[level] = 1;
 }
 
 function gainPerSecond(realm) {
-  return realm === '仙' ? BASE_GAIN_XIAN : BASE_GAIN_PRE;
+  const base = REALM_CULTIVATE_GAIN[realm] || REALM_CULTIVATE_GAIN['飞升'];
+  const repeats = levelRepeatCount(state.level);
+  const capped = Math.min(20, repeats);
+  const highProb = 0.2 + (0.3 * capped) / 20; // up to 50%
+  const minFactor = 0.8 + (0.2 * capped) / 20; // up to 1.0
+  const roll = Math.random();
+  const factor = roll < highProb ? 1.2 : minFactor + Math.random() * (1.2 - minFactor);
+  return base * factor;
 }
 
 function formatLevel(level) {
@@ -568,6 +610,8 @@ function loadState() {
       if (!state.battle) state.battle = null;
       if (typeof state.caution !== 'number') state.caution = 100;
       if (typeof state.cautionDeaths !== 'number') state.cautionDeaths = 0;
+      if (!state.levelRepeats || typeof state.levelRepeats !== 'object') state.levelRepeats = {};
+      ensureLevelEntry(state.level);
       state.xpToNext = requiredXp(state.level);
     } catch (err) {
       console.warn('Failed to load save', err);
@@ -897,6 +941,7 @@ function levelUp() {
   state.spiritStones -= cost;
   const spentXp = state.xpToNext;
   state.level += 1;
+  registerLevelEntry(state.level);
   state.xp = Math.max(0, state.xp - spentXp);
   state.xpToNext = requiredXp(state.level);
   if (state.xp >= state.xpToNext) {
@@ -949,6 +994,12 @@ function handleWork(action) {
   const fatigue = 1.6;
   state.mood = Math.max(5, state.mood - fatigue);
   state.activityProgress += 1;
+
+  if (moodTier() >= moodStages.length - 3) {
+    settleWork('心境失衡，提前结算');
+    startActivity('调心', 6);
+    return;
+  }
 
   const isComplete = state.activityProgress >= state.activityDuration;
   if (isComplete) {
@@ -1019,10 +1070,27 @@ function startBattle(enemyLevel, source = '偶遇来敌', { force = false } = {}
   winRate += winRate * boost;
   winRate = Math.max(0.02, Math.min(0.98, winRate));
 
-  const closeness = Math.max(1, Math.abs(state.level - enemyLevel));
-  const avg = (state.level + enemyLevel) / 2;
-  const durationBase = (closeness < 2 ? 32 : 14) * (avg / 10 + 1);
-  const duration = Math.max(1, Math.min(320, Math.round(durationBase / Math.max(1, closeness / 2))));
+  const realmBaseMap = {
+    练气: 1,
+    筑基: 3,
+    结丹: 5,
+    元婴: 7,
+    化神: 10,
+    炼虚: 14,
+    合体: 18,
+    大乘: 22,
+    渡劫: 26,
+    飞升: 28,
+    仙: 30,
+  };
+  const playerInfo = levelToRealmStage(state.level);
+  const enemyInfo = levelToRealmStage(enemyLevel);
+  const baseRealm = realmBaseMap[playerInfo.realm] || 14;
+  const enemyBase = realmBaseMap[enemyInfo.realm] || 14;
+  const gap = Math.abs(state.level - enemyLevel);
+  const closenessFactor = 1 + Math.max(0, 5 - Math.min(gap, 5)) * 0.08; // 拉长接近修为的战斗
+  const baseDuration = Math.max(baseRealm, enemyBase);
+  const duration = Math.max(1, Math.min(30, Math.round(baseDuration * closenessFactor)));
 
   state.prevActivity = state.activity;
   state.battle = {
@@ -1289,7 +1357,7 @@ function handleDeath(reason) {
   Object.assign(state, {
     level: 1,
     xp: 0,
-    xpToNext: BASE_EXP,
+    xpToNext: LEVEL_NEED_EXP['练气'][0],
     spiritStones: 0,
     mood: 70,
     totalDays: keepTotal,
@@ -1311,7 +1379,9 @@ function handleDeath(reason) {
     prevActivity: '修行',
     caution: state.caution,
     cautionDeaths: state.cautionDeaths,
+    levelRepeats: state.levelRepeats,
   });
+  registerLevelEntry(1);
   initialStory(sect);
 }
 
@@ -1321,6 +1391,7 @@ function randomSect() {
 }
 
 function initialStory(sectName) {
+  ensureLevelEntry(state.level);
   addMajor('出生于凡尘，灵根潜藏');
   addMajor('童年平凡，劳作习武，心性渐成');
   addMajor('七岁识字，八岁觉醒前世记忆');
@@ -1444,7 +1515,7 @@ function resetAll() {
   Object.assign(state, {
     level: 1,
     xp: 0,
-    xpToNext: BASE_EXP,
+    xpToNext: LEVEL_NEED_EXP['练气'][0],
     spiritStones: 0,
     mood: 70,
     totalDays: START_AGE_YEARS * DAYS_PER_YEAR,
@@ -1466,6 +1537,7 @@ function resetAll() {
     prevActivity: '修行',
     caution: 100,
     cautionDeaths: 0,
+    levelRepeats: { 1: 1 },
   });
 
   pomodoro.mode = 'work';

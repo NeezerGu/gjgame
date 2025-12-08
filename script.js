@@ -136,6 +136,8 @@ const state = {
   workPlan: null,
   workStreak: 0,
   cultivateStreak: 0,
+  planMode: '冲境界',
+  knownMaxLevel: 1,
   condition: '正常',
   healTimer: 0,
   nearDeathTimer: 0,
@@ -733,7 +735,20 @@ function cautionStep(ageYears) {
   const nextValue = Math.max(0, state.caution * (1 - rate));
   state.cautionDeaths = nextTimes;
   state.caution = nextValue;
-  addMajor(`谨慎度下降至${nextValue.toFixed(2)}（${nextTimes}次生死历练）`);
+  addMajor('生死一遭，道心更慎，行事愈加小心翼翼');
+}
+
+function updatePlanMode() {
+  const realm = levelToRealmStage(state.level).realm;
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const maxWorkReward = cfg.reward[1];
+  const stashStones = (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
+  const wealth = state.spiritStones + stashStones;
+  if (state.reincarnation >= 1 && wealth > maxWorkReward * 365) {
+    state.planMode = '打工攒积累';
+  } else {
+    state.planMode = '冲境界';
+  }
 }
 
 function rollBaseLifespan() {
@@ -876,7 +891,15 @@ function formatDetail(entry) {
   return entry.details.map((d) => d.note || '').filter(Boolean).join('；');
 }
 
+function hasActiveSelection() {
+  const sel = window.getSelection();
+  return sel && sel.toString();
+}
+
 function renderLogs() {
+  if (!logsDirty) return;
+  if (hasActiveSelection()) return;
+
   ui.log.innerHTML = '';
   const fragment = document.createDocumentFragment();
   state.autoLogs.slice(-80).forEach((entry) => {
@@ -897,6 +920,7 @@ function renderLogs() {
     majorFragment.prepend(div);
   });
   ui.majorLog.appendChild(majorFragment);
+  logsDirty = false;
 }
 
 function renderArtifacts() {
@@ -938,6 +962,7 @@ function addAutoLogEntry(action) {
   const last = latestLogEntry;
   if (last && last.action === action && !last.locked) {
     last.endDay = day;
+    logsDirty = true;
     return last;
   }
   const entry = { startDay: day, endDay: day, action, details: [], events: [], locked: false };
@@ -946,18 +971,21 @@ function addAutoLogEntry(action) {
     state.autoLogs.splice(0, state.autoLogs.length - AUTO_LOG_LIMIT);
   }
   latestLogEntry = entry;
+  logsDirty = true;
   return entry;
 }
 
 function addDetail(action, detail) {
   const entry = addAutoLogEntry(action);
   entry.details.push(detail);
+  logsDirty = true;
 }
 
 function addMoodEvent(action, text) {
   const entry = addAutoLogEntry(action);
   entry.events.push(text);
   entry.locked = true;
+  logsDirty = true;
 }
 
 function addMajor(text) {
@@ -974,6 +1002,7 @@ function addMajor(text) {
   if (state.autoLogs.length > AUTO_LOG_LIMIT) {
     state.autoLogs.splice(0, state.autoLogs.length - AUTO_LOG_LIMIT);
   }
+  logsDirty = true;
 }
 
 function saveState() {
@@ -1017,6 +1046,10 @@ function loadState() {
       if (typeof state.caution !== 'number') state.caution = 100;
       if (typeof state.cautionDeaths !== 'number') state.cautionDeaths = 0;
       if (!state.levelRepeats || typeof state.levelRepeats !== 'object') state.levelRepeats = {};
+      if (!state.planMode) state.planMode = '冲境界';
+      if (!state.knownMaxLevel || state.knownMaxLevel < state.level) {
+        state.knownMaxLevel = state.level;
+      }
       if (!state.workPlan) state.workPlan = null;
       ensureLevelEntry(state.level);
       state.xpToNext = requiredXp(state.level);
@@ -1029,6 +1062,7 @@ function loadState() {
           state.activityProgress = 0;
         }
       }
+      updatePlanMode();
     } catch (err) {
       console.warn('Failed to load save', err);
     }
@@ -1104,6 +1138,20 @@ function syncCautionInputs() {
 }
 
 const testMessages = [];
+let logsDirty = true;
+
+function aiInsights() {
+  const lifeNo = state.reincarnation + 1;
+  const highest = formatLevel(state.knownMaxLevel || state.level);
+  const remain = remainingYears();
+  const remainText = Number.isFinite(state.lifespanYears) ? `${Math.max(0, Math.floor(remain))}年` : '无上限';
+  const stashInfo = `${(state.stashes || []).length}处藏宝`;
+  const resourceLine = `灵石${state.spiritStones.toFixed(0)}，灵宝${state.artifacts.length}`;
+  return [
+    `轻智能：第${lifeNo}世 · 策略：${state.planMode} · 已知最高：${highest}`,
+    `寿元预估：${remainText} · 资源：${resourceLine} · 藏宝：${stashInfo}`,
+  ];
+}
 
 function renderTestInfo() {
   if (!ui.testInfo) return;
@@ -1113,11 +1161,8 @@ function renderTestInfo() {
   }
   const filtered = testMessages.filter((m) => m.ts >= cutoff);
   const lines = [`谨慎度：${state.caution.toFixed(2)}（死亡${state.cautionDeaths}次）`];
-  lines.push(
-    ...filtered
-      .slice(-MAX_TEST_INFO)
-      .map((m) => `[${m.stamp}] ${m.text}`)
-  );
+  lines.push(...aiInsights());
+  lines.push(...filtered.slice(-MAX_TEST_INFO).map((m) => `[${m.stamp}] ${m.text}`));
   ui.testInfo.textContent = lines.join('\n');
 }
 
@@ -1158,7 +1203,7 @@ function switchLogTab(target) {
 }
 
 function baseGain() {
-  const moodBonus = 0.85 + (state.mood - 60) / 90;
+  const moodBonus = Math.max(1, 0.85 + (state.mood - 60) / 90);
   const { realm } = levelToRealmStage(state.level);
   const xpGain = gainPerSecond(realm);
   const artifactBoost = 1 + artifactBonus('xpBoost');
@@ -1370,6 +1415,8 @@ function levelUp() {
   const spentXp = state.xpToNext;
   state.level += 1;
   registerLevelEntry(state.level);
+  state.knownMaxLevel = Math.max(state.knownMaxLevel || state.level, state.level);
+  updatePlanMode();
   state.xp = Math.max(0, state.xp - spentXp);
   state.xpToNext = requiredXp(state.level);
   const { realm, stage } = levelToRealmStage(state.level);
@@ -1487,7 +1534,6 @@ function handleBreakthrough() {
     const target = formatLevel(state.level + 1);
     levelUp();
     addDetail('突破', { note: `突破至${target}` });
-    addMajor(`突破至${target}`);
     startActivity('修行', 0);
   }
 }
@@ -1787,11 +1833,16 @@ function handleDeath(reason) {
     addMajor('身死道消，随身天道灵宝散去');
   }
   state.reincarnation += 1;
+  const lifeNo = state.reincarnation + 1;
   const sect = randomSect();
-  addMajor(`转生轮回，第${state.reincarnation}世。${sect}弟子将于八岁觉醒记忆。`);
   latestLogEntry = null;
   const keepTotal = state.totalDays;
+  const keepStashes = Array.isArray(state.stashes) ? state.stashes : [];
+  const keepRepeats = state.levelRepeats;
+  const keepPlan = state.planMode || '冲境界';
+  const knownMax = Math.max(state.knownMaxLevel || 1, state.level);
   const newBase = rollBaseLifespan();
+
   Object.assign(state, {
     level: 1,
     xp: 0,
@@ -1799,7 +1850,7 @@ function handleDeath(reason) {
     spiritStones: 0,
     mood: 70,
     totalDays: keepTotal,
-    lifeDays: START_AGE_YEARS * DAYS_PER_YEAR,
+    lifeDays: 0,
     activity: '修行',
     activityDuration: 0,
     activityProgress: 0,
@@ -1807,6 +1858,8 @@ function handleDeath(reason) {
     workPlan: null,
     workStreak: 0,
     cultivateStreak: 0,
+    planMode: keepPlan,
+    knownMaxLevel: knownMax,
     condition: '正常',
     healTimer: 0,
     nearDeathTimer: 0,
@@ -1814,7 +1867,7 @@ function handleDeath(reason) {
     majorLogs: state.majorLogs,
     reincarnation: state.reincarnation,
     artifacts: [],
-    stashes: state.stashes || [],
+    stashes: keepStashes,
     lifespanBase: newBase,
     lifespanBonus: 0,
     lifespanYears: newBase,
@@ -1824,10 +1877,14 @@ function handleDeath(reason) {
     prevActivity: '修行',
     caution: state.caution,
     cautionDeaths: state.cautionDeaths,
-    levelRepeats: state.levelRepeats,
+    levelRepeats: keepRepeats,
   });
   registerLevelEntry(1);
-  initialStory(sect);
+  const { finalDay, ageDays } = narrateRebirth(sect, keepTotal);
+  addMajor(`转生轮回，第${lifeNo}世。${sect}弟子将于八岁觉醒记忆。`);
+  state.totalDays = finalDay;
+  state.lifeDays = ageDays;
+  updatePlanMode();
 }
 
 function randomSect() {
@@ -1835,12 +1892,35 @@ function randomSect() {
   return names[Math.floor(Math.random() * names.length)];
 }
 
+function narrateRebirth(sectName, baseDay = 0) {
+  const origin = Math.max(0, baseDay);
+  const birthDay = origin + randRange(20, 120);
+  const childhoodDay = birthDay + randRange(2 * DAYS_PER_YEAR, 3 * DAYS_PER_YEAR);
+  const literacyDay = birthDay + 7 * DAYS_PER_YEAR + randRange(-30, 40);
+  const awakenDay = birthDay + START_AGE_YEARS * DAYS_PER_YEAR;
+  const sectDay = awakenDay + randRange(5, 120);
+  const timeline = [
+    { day: birthDay, text: '出生于凡尘，灵根潜藏' },
+    { day: childhoodDay, text: '童年平凡，劳作习武，心性渐成' },
+    { day: literacyDay, text: '七岁识字，开蒙见世' },
+    { day: awakenDay, text: '八岁觉醒前世记忆' },
+    { day: sectDay, text: `被仙门发现，收录入${sectName}` },
+  ];
+
+  timeline.forEach(({ day, text }) => {
+    state.totalDays = day;
+    addMajor(text);
+  });
+
+  state.totalDays = sectDay;
+  state.lifeDays = sectDay - birthDay;
+  return { finalDay: sectDay, ageDays: state.lifeDays };
+}
+
 function initialStory(sectName) {
   ensureLevelEntry(state.level);
-  addMajor('出生于凡尘，灵根潜藏');
-  addMajor('童年平凡，劳作习武，心性渐成');
-  addMajor('七岁识字，八岁觉醒前世记忆');
-  addMajor(`被仙门发现，收录入${sectName}`);
+  const base = Math.max(0, state.totalDays - state.lifeDays);
+  narrateRebirth(sectName, base);
 }
 
 function tickDay() {
@@ -2007,6 +2087,7 @@ function resetAll() {
   localStorage.removeItem(WINDOW_KEY);
 
   initialStory(randomSect());
+  updatePlanMode();
   highlightGear();
   renderTestInfo();
   updateUI();

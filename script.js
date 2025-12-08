@@ -50,18 +50,34 @@ const TEST_INFO_LIFETIME = 30 * 1000;
 const CAUTION_K = 0.03046;
 const CAUTION_ALPHA = 0.493;
 
+const LONGEVITY_BASE_RANGE = [50, 80];
+const LONGEVITY_MAX_ROLL = 0.02;
+const LONGEVITY_REALM_BONUS = {
+  练气: 0,
+  筑基: 100,
+  结丹: 200,
+  元婴: 400,
+  化神: 1000,
+  炼虚: 1500,
+  合体: 3000,
+  大乘: 5000,
+  渡劫: 7000,
+  飞升: 10000,
+  仙: Infinity,
+};
+
 const REALM_CULTIVATE_GAIN = {
   练气: 10,
   筑基: 20,
-  结丹: 30,
-  元婴: 40,
-  化神: 60,
-  炼虚: 80,
-  合体: 120,
-  大乘: 160,
-  渡劫: 220,
+  结丹: 40,
+  元婴: 70,
+  化神: 110,
+  炼虚: 150,
+  合体: 190,
+  大乘: 230,
+  渡劫: 265,
   飞升: 300,
-  仙: 300,
+  仙: 500,
 };
 
 const BREAK_COST = {
@@ -80,19 +96,20 @@ const BREAK_COST = {
 const XIAN_BREAK_COST = 160000;
 
 const LEVEL_NEED_EXP = {
-  练气: [3450, 6900, 10350, 13800, 17250, 20710, 24160, 27610, 31060, 34510],
-  筑基: [7960, 15930, 23890, 31850, 39820, 47780, 55750, 63710, 71670, 79640],
-  结丹: [25880, 51760, 77650, 103530, 129410, 155290, 181170, 207050, 232940, 258820],
-  元婴: [39820, 79640, 119450, 159270, 199090, 238910, 278730, 318550, 358360, 398180],
-  化神: [159270, 318550, 477820, 637090, 796360, 955640, 1114910, 1274180, 1433450, 1592730],
-  炼虚: [371640, 743270, 1114910, 1486550, 1858180, 2229820, 2601450, 2973090, 3344730, 3716360],
-  合体: [1194550, 2389090, 3583640, 4778180, 5972730, 7167270, 8361820, 9556360, 10750910, 11945450],
-  大乘: [3185450, 6370910, 9556360, 12741820, 15927270, 19112730, 22298180, 25483640, 28669090, 31854550],
-  渡劫: [8760000, 17520000, 26280000, 35040000, 43800000, 52560000, 61320000, 70080000, 78840000, 87600000],
+  练气: [1898, 5694, 9490, 13286, 17082, 20878, 24674, 28470, 32266, 36062],
+  筑基: [36066, 62118, 88170, 114222, 140274, 166326, 192378, 218430, 244482, 270534],
+  结丹: [270536, 291528, 312520, 333512, 354504, 375496, 396488, 417480, 438472, 459464],
+  元婴: [459466, 616918, 774370, 931822, 1089274, 1246726, 1404178, 1561630, 1719082, 1876534],
+  化神: [1876537, 2140862, 2405187, 2669512, 2933837, 3198163, 3462488, 3726813, 3991138, 4255463],
+  炼虚: [4255464, 5256472, 6257480, 7258488, 8259496, 9260504, 10261512, 11262520, 12263528, 13264536],
+  合体: [13264537, 16805751, 20346965, 23888179, 27429393, 30970607, 34511821, 38053035, 41594249, 45135463],
+  大乘: [45135465, 46298695, 47461925, 48625155, 49788385, 50951615, 52114845, 53278075, 54441305, 55604535],
+  渡劫: [55604539, 58010197, 60415855, 62821513, 65227171, 67632829, 70038487, 72444145, 74849803, 77255461],
+  飞升: [964476000],
 };
 
-const FLY_EXP = 242076000;
-const XIAN_BASE_EXP = 484152000;
+const FLY_EXP = 964476000;
+const XIAN_BASE_EXP = FLY_EXP * 3;
 
 const realmOrder = ['练气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫', '飞升'];
 const TOTAL_PRE_LEVELS = realmOrder.reduce((sum, name) => sum + (name === '飞升' ? 1 : 10), 0);
@@ -126,12 +143,20 @@ const state = {
   majorLogs: [],
   reincarnation: 0,
   artifacts: [],
+  stashes: [],
+  lifespanBase: 0,
+  lifespanYears: 0,
+  lifespanBonus: 0,
+  lifespanApplied: {},
+  lifespanWarned: { finalYear: false, tenYear: false },
   battle: null,
   prevActivity: '修行',
   caution: 100,
   cautionDeaths: 0,
   levelRepeats: { 1: 1 },
 };
+
+ensureLifespan();
 
 const statusClassMap = {
   修行: 'cultivate',
@@ -711,6 +736,65 @@ function cautionStep(ageYears) {
   addMajor(`谨慎度下降至${nextValue.toFixed(2)}（${nextTimes}次生死历练）`);
 }
 
+function rollBaseLifespan() {
+  if (Math.random() < LONGEVITY_MAX_ROLL) return 100;
+  return randRange(LONGEVITY_BASE_RANGE[0], LONGEVITY_BASE_RANGE[1]);
+}
+
+function ensureLifespan() {
+  if (!state.lifespanBase) state.lifespanBase = rollBaseLifespan();
+  if (!state.lifespanBonus) state.lifespanBonus = 0;
+  if (!state.lifespanYears) state.lifespanYears = state.lifespanBase + state.lifespanBonus;
+  if (!state.lifespanApplied) state.lifespanApplied = {};
+  if (!state.lifespanWarned) state.lifespanWarned = { finalYear: false, tenYear: false };
+}
+
+function remainingYears() {
+  const ageYears = Math.floor(state.lifeDays / DAYS_PER_YEAR);
+  return (state.lifespanYears || 0) - ageYears;
+}
+
+function applyLongevity(realm) {
+  ensureLifespan();
+  if (state.lifespanApplied[realm]) return;
+  const bonus = LONGEVITY_REALM_BONUS[realm] || 0;
+  state.lifespanApplied[realm] = true;
+  if (!Number.isFinite(bonus)) {
+    state.lifespanYears = Infinity;
+    addMajor('羽化飞升，寿元不再受限');
+    state.lifespanWarned.finalYear = false;
+    state.lifespanWarned.tenYear = false;
+    return;
+  }
+  state.lifespanBonus += bonus;
+  const remBefore = remainingYears();
+  state.lifespanYears += bonus;
+  const remAfter = remainingYears();
+  addMajor(`境界精进，寿元延长${bonus}年`);
+  if (remBefore <= 10 && remAfter > 10) {
+    addMajor('寿元再添光阴，心中一松，劫数暂缓');
+    state.lifespanWarned.tenYear = false;
+  }
+}
+
+function checkLifespanWarnings() {
+  ensureLifespan();
+  if (!Number.isFinite(state.lifespanYears)) return;
+  const ageYears = Math.floor(state.lifeDays / DAYS_PER_YEAR);
+  const remain = state.lifespanYears - ageYears;
+  if (state.reincarnation === 0 && !state.lifespanWarned.finalYear && remain <= 1) {
+    addMajor('模糊感知寿元将尽，也许只剩一年。');
+    state.lifespanWarned.finalYear = true;
+  }
+  if (state.reincarnation > 0 && !state.lifespanWarned.tenYear && remain <= 10) {
+    addMajor('不知为何，你清晰感知到自己的大限将至，大约还有十年。');
+    state.lifespanWarned.tenYear = true;
+  }
+  if (remain <= 0) {
+    handleDeath('寿元耗尽，坐化而逝');
+  }
+}
+
 function cautiousRoll(prob, onAvoid) {
   const base = Math.max(0, Math.min(1, prob));
   const scaled = base * cautionFactor();
@@ -926,6 +1010,8 @@ function loadState() {
       if (!Array.isArray(state.artifacts)) state.artifacts = [];
       state.artifacts = state.artifacts.map(withArtifactMeta).slice(0, MAX_ARTIFACTS);
       if (typeof state.lifeDays !== 'number') state.lifeDays = state.totalDays;
+      if (!Array.isArray(state.stashes)) state.stashes = [];
+      ensureLifespan();
       if (!state.prevActivity) state.prevActivity = '修行';
       if (!state.battle) state.battle = null;
       if (typeof state.caution !== 'number') state.caution = 100;
@@ -1286,6 +1372,10 @@ function levelUp() {
   registerLevelEntry(state.level);
   state.xp = Math.max(0, state.xp - spentXp);
   state.xpToNext = requiredXp(state.level);
+  const { realm, stage } = levelToRealmStage(state.level);
+  if (stage === 1) {
+    applyLongevity(realm);
+  }
   if (state.xp >= state.xpToNext) {
     state.xp = Math.floor(state.xpToNext * 0.25);
   }
@@ -1701,6 +1791,7 @@ function handleDeath(reason) {
   addMajor(`转生轮回，第${state.reincarnation}世。${sect}弟子将于八岁觉醒记忆。`);
   latestLogEntry = null;
   const keepTotal = state.totalDays;
+  const newBase = rollBaseLifespan();
   Object.assign(state, {
     level: 1,
     xp: 0,
@@ -1723,6 +1814,12 @@ function handleDeath(reason) {
     majorLogs: state.majorLogs,
     reincarnation: state.reincarnation,
     artifacts: [],
+    stashes: state.stashes || [],
+    lifespanBase: newBase,
+    lifespanBonus: 0,
+    lifespanYears: newBase,
+    lifespanApplied: {},
+    lifespanWarned: { finalYear: false, tenYear: false },
     battle: null,
     prevActivity: '修行',
     caution: state.caution,
@@ -1807,6 +1904,8 @@ function tickDay() {
   }
   handleMoodCollapse();
 
+  checkLifespanWarnings();
+
   clampXp();
 }
 
@@ -1881,12 +1980,20 @@ function resetAll() {
     majorLogs: [],
     reincarnation: 0,
     artifacts: [],
+    stashes: [],
+    lifespanBase: rollBaseLifespan(),
+    lifespanBonus: 0,
+    lifespanYears: 0,
+    lifespanApplied: {},
+    lifespanWarned: { finalYear: false, tenYear: false },
     battle: null,
     prevActivity: '修行',
     caution: 100,
     cautionDeaths: 0,
     levelRepeats: { 1: 1 },
   });
+
+  state.lifespanYears = state.lifespanBase;
 
   pomodoro.mode = 'work';
   pomodoro.running = false;

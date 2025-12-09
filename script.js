@@ -163,6 +163,7 @@ const state = {
   caution: 100,
   cautionDeaths: 0,
   levelRepeats: { 1: 1 },
+  finalLegacyPrepared: false,
 };
 
 ensureLifespan();
@@ -768,17 +769,31 @@ function describeStashContents(stash) {
 }
 
 function createStash(reason, options = {}) {
-  const { portionRange = [0.3, 0.5], includeArtifactChance = 0.15, force = false } = options;
-  const min = Math.max(0, portionRange[0]);
-  const max = Math.max(min, portionRange[1]);
-  const fraction = min + Math.random() * (max - min);
-  const stones = Math.floor(state.spiritStones * fraction);
+  const {
+    portionRange = [0.3, 0.5],
+    includeArtifactChance = 0.15,
+    force = false,
+    takeAll = false,
+  } = options;
+  let stones = 0;
   const stashArtifacts = [];
 
-  if (state.artifacts.length > 1 && Math.random() < includeArtifactChance) {
-    const idx = Math.floor(Math.random() * state.artifacts.length);
-    const [artifact] = state.artifacts.splice(idx, 1);
-    stashArtifacts.push(artifact);
+  if (takeAll) {
+    stones = Math.floor(state.spiritStones);
+    if (Array.isArray(state.artifacts) && state.artifacts.length) {
+      stashArtifacts.push(...state.artifacts.splice(0));
+    }
+  } else {
+    const min = Math.max(0, portionRange[0]);
+    const max = Math.max(min, portionRange[1]);
+    const fraction = min + Math.random() * (max - min);
+    stones = Math.floor(state.spiritStones * fraction);
+
+    if (state.artifacts.length > 1 && Math.random() < includeArtifactChance) {
+      const idx = Math.floor(Math.random() * state.artifacts.length);
+      const [artifact] = state.artifacts.splice(idx, 1);
+      stashArtifacts.push(artifact);
+    }
   }
 
   if (!force && stones <= 0 && stashArtifacts.length === 0) return false;
@@ -871,6 +886,8 @@ function maybeOpenStashes() {
     stash.stones = 0;
     stash.artifacts = [];
   });
+
+  updatePlanMode();
 }
 
 function maybeFirstLifeStash() {
@@ -903,7 +920,7 @@ function maybeAccumulateStash() {
   if (state.spiritStones <= target) return;
   if (state.totalDays - state.lastStashDay < 180) return;
 
-  const ok = createStash('担心风险，你预留一批灵石跨世存放。', {
+  const ok = createStash('灵机一动，你以玉符封存部分灵石与零散物事，寄望后世再取。', {
     portionRange: [0.3, 0.5],
     includeArtifactChance: 0.25,
   });
@@ -913,7 +930,34 @@ function maybeAccumulateStash() {
   }
 }
 
+function maybePrepareFinalStash(force = false) {
+  if (state.reincarnation < 1) return;
+  if (state.planMode !== '打工攒积累') return;
+  if (state.finalLegacyPrepared) return;
+  const monthThreshold = DAYS_PER_MONTH / DAYS_PER_YEAR;
+  if (!force && remainingYears() > monthThreshold) return;
+  const hasLoot = state.spiritStones > 0 || (Array.isArray(state.artifacts) && state.artifacts.length > 0);
+  if (!hasLoot) {
+    addMajor('感应末劫将临，却发现身无长物可封，唯有叹息。');
+    state.finalLegacyPrepared = true;
+    return;
+  }
+
+  const ok = createStash('劫气隐约，一月之前你已将此世所得封入秘窟，静待后世自取。', {
+    takeAll: true,
+    force: true,
+  });
+  if (ok) {
+    state.finalLegacyPrepared = true;
+  }
+}
+
 function updatePlanMode() {
+  const pending = pendingStashes();
+  if (pending.length > 0) {
+    state.planMode = '修炼取宝';
+    return;
+  }
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const maxWorkReward = cfg.reward[1];
@@ -1007,6 +1051,9 @@ function checkLifespanWarnings() {
   if (state.reincarnation > 0 && !state.lifespanWarned.tenYear && remain <= 10) {
     addMajor('不知为何，你清晰感知到自己的大限将至，大约还有十年。');
     state.lifespanWarned.tenYear = true;
+  }
+  if (state.reincarnation > 0) {
+    maybePrepareFinalStash();
   }
   if (remain <= 0) {
     handleDeath('寿元耗尽，坐化而逝');
@@ -1260,6 +1307,7 @@ function loadState() {
       if (!state.workPlan) state.workPlan = null;
       if (!state.bestLevelThisLife || state.bestLevelThisLife < 1) state.bestLevelThisLife = state.level;
       if (!state.lastLifePeak) state.lastLifePeak = 0;
+      if (typeof state.finalLegacyPrepared !== 'boolean') state.finalLegacyPrepared = false;
       ensureLevelEntry(state.level);
       state.xpToNext = requiredXp(state.level);
       if (state.activity === '打工') {
@@ -2045,6 +2093,7 @@ function maybeFindStones(action) {
 }
 
 function handleDeath(reason) {
+  maybePrepareFinalStash(true);
   addMajor(`死亡：${reason}`);
   const deathAgeYears = Math.max(1, Math.floor(state.lifeDays / DAYS_PER_YEAR));
   cautionStep(deathAgeYears);
@@ -2104,6 +2153,7 @@ function handleDeath(reason) {
     caution: state.caution,
     cautionDeaths: state.cautionDeaths,
     levelRepeats: keepRepeats,
+    finalLegacyPrepared: false,
   });
   registerLevelEntry(1);
   const { finalDay, ageDays } = narrateRebirth(sect, keepTotal);
@@ -2281,6 +2331,8 @@ function resetAll() {
     pendingWorkReward: 0,
     workStreak: 0,
     cultivateStreak: 0,
+    planMode: '冲境界',
+    knownMaxLevel: 1,
     condition: '正常',
     healTimer: 0,
     nearDeathTimer: 0,
@@ -2305,6 +2357,7 @@ function resetAll() {
     caution: 100,
     cautionDeaths: 0,
     levelRepeats: { 1: 1 },
+    finalLegacyPrepared: false,
   });
 
   state.lifespanYears = state.lifespanBase;

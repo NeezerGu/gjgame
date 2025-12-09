@@ -31,6 +31,7 @@ const ui = {
   cautionDeathsInput: document.getElementById('cautionDeaths'),
   cautionSetBtn: document.getElementById('setCaution'),
   resetAllBtn: document.getElementById('resetAll'),
+  stashTest: document.getElementById('stashTest'),
 };
 
 const STORAGE_KEY = 'idle-cultivation-save-v2';
@@ -95,6 +96,24 @@ const BREAK_COST = {
 
 const XIAN_BREAK_COST = 160000;
 
+const LONGEVITY_ELIXIRS = {
+  small: { name: '延寿丹（小）', bonus: 100, price: 1_000_000, maxRealm: '元婴', maxCount: 10 },
+  medium: { name: '延寿丹（中）', bonus: 300, price: 30_000_000, maxRealm: '合体', maxCount: 10 },
+  large: { name: '延寿丹（大）', bonus: 1000, price: 200_000_000, maxRealm: null, maxCount: Infinity },
+};
+
+const CULTIVATE_ELIXIR = {
+  练气: { add_exp: 3650, price_ls: 4015 },
+  筑基: { add_exp: 10950, price_ls: 10220 },
+  结丹: { add_exp: 18250, price_ls: 25550 },
+  元婴: { add_exp: 29200, price_ls: 62050 },
+  化神: { add_exp: 43800, price_ls: 135050 },
+  炼虚: { add_exp: 58400, price_ls: 273750 },
+  合体: { add_exp: 73000, price_ls: 511000 },
+  大乘: { add_exp: 83950, price_ls: 876000 },
+  渡劫: { add_exp: 94900, price_ls: 1460000 },
+};
+
 const LEVEL_NEED_EXP = {
   练气: [1898, 5694, 9490, 13286, 17082, 20878, 24674, 28470, 32266, 36062],
   筑基: [36066, 62118, 88170, 114222, 140274, 166326, 192378, 218430, 244482, 270534],
@@ -146,16 +165,29 @@ const state = {
   reincarnation: 0,
   artifacts: [],
   stashes: [],
+  lastStashDay: 0,
+  lastTheftRollLife: 0,
+  lastStashReminderLife: 0,
+  firstLifeStashSettled: false,
+  bestLevelThisLife: 1,
+  lastLifePeak: 0,
   lifespanBase: 0,
   lifespanYears: 0,
   lifespanBonus: 0,
   lifespanApplied: {},
   lifespanWarned: { finalYear: false, tenYear: false },
+  pillMerchantKnown: false,
+  longevityConsumed: { small: 0, medium: 0, large: 0 },
+  cultivateElixirUses: {},
+  pills: [],
   battle: null,
   prevActivity: '修行',
   caution: 100,
   cautionDeaths: 0,
   levelRepeats: { 1: 1 },
+  finalLegacyPrepared: false,
+  planReason: '初始设定：以突破为先。',
+  planExpectationLevel: null,
 };
 
 ensureLifespan();
@@ -666,6 +698,11 @@ function levelToRealmStage(level) {
   return { realm: '仙', stage: idx };
 }
 
+function realmRank(realm) {
+  const idx = realmOrder.indexOf(realm);
+  return idx === -1 ? realmOrder.length : idx;
+}
+
 function requiredXp(level) {
   const { realm, stage } = levelToRealmStage(level);
   if (LEVEL_NEED_EXP[realm]) {
@@ -738,17 +775,467 @@ function cautionStep(ageYears) {
   addMajor('生死一遭，道心更慎，行事愈加小心翼翼');
 }
 
+function currentLife() {
+  return (state.reincarnation || 0) + 1;
+}
+
+function stashWealthThreshold(realm) {
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const maxReward = cfg.reward[1];
+  const avgDuration = Math.max(1, (cfg.duration[0] + cfg.duration[1]) / 2);
+  const yearlyReward = maxReward * (DAYS_PER_YEAR / avgDuration);
+  return yearlyReward * randRange(5, 10);
+}
+
+function elixirLabel(item) {
+  if (!item) return '丹药';
+  if (item.kind === 'longevity') {
+    const info = LONGEVITY_ELIXIRS[item.tier];
+    return info?.name || '延寿丹';
+  }
+  if (item.kind === 'cultivate') {
+    return `${item.realm}修炼丹`;
+  }
+  return '丹药';
+}
+
+function describeStashContents(stash) {
+  const parts = [];
+  if (stash.stones > 0) parts.push(`${stash.stones}枚灵石`);
+  if (Array.isArray(stash.artifacts) && stash.artifacts.length) {
+    const names = stash.artifacts.map((a) => `「${a.name}」`);
+    parts.push(`天道灵宝${names.join('、')}`);
+  }
+  if (Array.isArray(stash.elixirs) && stash.elixirs.length) {
+    const names = stash.elixirs.map((e) => elixirLabel(e));
+    parts.push(`丹药${names.join('、')}`);
+  }
+  return parts.join('和') || '一些不起眼的小物件';
+}
+
+function createStash(reason, options = {}) {
+  const {
+    portionRange = [0.3, 0.5],
+    includeArtifactChance = 0.15,
+    force = false,
+    takeAll = false,
+  } = options;
+  let stones = 0;
+  const stashArtifacts = [];
+  const stashElixirs = [];
+
+  if (takeAll) {
+    stones = Math.floor(state.spiritStones);
+    if (Array.isArray(state.artifacts) && state.artifacts.length) {
+      stashArtifacts.push(...state.artifacts.splice(0));
+    }
+    if (Array.isArray(state.pills) && state.pills.length) {
+      stashElixirs.push(...state.pills.splice(0));
+    }
+  } else {
+    const min = Math.max(0, portionRange[0]);
+    const max = Math.max(min, portionRange[1]);
+    const fraction = min + Math.random() * (max - min);
+    stones = Math.floor(state.spiritStones * fraction);
+
+    if (state.artifacts.length > 1 && Math.random() < includeArtifactChance) {
+      const idx = Math.floor(Math.random() * state.artifacts.length);
+      const [artifact] = state.artifacts.splice(idx, 1);
+      stashArtifacts.push(artifact);
+    }
+    if (Array.isArray(state.pills) && state.pills.length) {
+      stashElixirs.push(...state.pills.splice(0));
+    }
+  }
+
+  if (!force && stones <= 0 && stashArtifacts.length === 0 && stashElixirs.length === 0) return false;
+
+  if (stones > 0) {
+    state.spiritStones -= stones;
+  }
+
+  const stash = {
+    id: `stash-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    createdLife: currentLife(),
+    stones,
+    artifacts: stashArtifacts,
+    elixirs: stashElixirs,
+    stolen: false,
+    opened: false,
+    openedLife: null,
+  };
+
+  state.stashes.push(stash);
+  const contentText = describeStashContents(stash);
+  addMajor(reason || `你悄然将${contentText}埋入隐蔽之所，以备后用。`);
+  state.lastStashDay = Math.floor(state.totalDays);
+  return true;
+}
+
+function pendingStashes() {
+  const life = currentLife();
+  return (state.stashes || []).filter((stash) => !stash.opened && stash.createdLife < life);
+}
+
+function stashStoneSum() {
+  return (state.stashes || []).reduce((sum, s) => {
+    if (s.opened || s.stolen) return sum;
+    return sum + (s.stones || 0);
+  }, 0);
+}
+
+function totalStoneWealth() {
+  const stash = stashStoneSum();
+  const carried = state.spiritStones || 0;
+  return { total: carried + stash, stash, carried };
+}
+
+function rollStashTheft() {
+  const life = currentLife();
+  if (state.lastTheftRollLife === life) return;
+  state.lastTheftRollLife = life;
+  state.stashes = (state.stashes || []).map((stash) => {
+    if (stash.opened || stash.createdLife >= life) return stash;
+    if (stash.stolen) return stash;
+    const stolen = Math.random() < 0.05;
+    if (stolen) {
+      return { ...stash, stolen: true, stones: 0, artifacts: [], elixirs: [] };
+    }
+    return stash;
+  });
+}
+
+function remindStashMemory() {
+  const life = currentLife();
+  rollStashTheft();
+  if (state.lastStashReminderLife === life) return;
+  const pending = pendingStashes();
+  if (pending.length > 0) {
+    addMajor('前世藏宝的记忆浮现，决心至练气五层后再去寻回。');
+    state.lastStashReminderLife = life;
+  }
+}
+
+function maybeOpenStashes() {
+  const { realm, stage } = levelToRealmStage(state.level);
+  if (realm === '练气' && stage < 5) return;
+  const life = currentLife();
+  const available = pendingStashes();
+  if (!available.length) return;
+
+  available.forEach((stash) => {
+    stash.opened = true;
+    stash.openedLife = life;
+    if (stash.stolen) {
+      addMajor('记忆中的藏宝已被人捷足先登，空余旧坑。');
+      return;
+    }
+
+    const gains = [];
+    if (stash.stones > 0) {
+      state.spiritStones += stash.stones;
+      gains.push(`${stash.stones}枚灵石`);
+    }
+
+    if (Array.isArray(stash.artifacts) && stash.artifacts.length) {
+      const restored = [];
+      stash.artifacts.forEach((item) => {
+        const artifact = withArtifactMeta(item);
+        if (state.artifacts.length < MAX_ARTIFACTS) {
+          state.artifacts.push(artifact);
+          restored.push(`「${artifact.name}」`);
+        }
+      });
+      if (restored.length) {
+        gains.push(`天道灵宝${restored.join('、')}`);
+      }
+    }
+
+    if (Array.isArray(stash.elixirs) && stash.elixirs.length) {
+      const elixirNames = stash.elixirs.map((e) => elixirLabel(e));
+      gains.push(`丹药${elixirNames.join('、')}`);
+      stash.elixirs.forEach((pill) => {
+        if (pill.kind === 'longevity') {
+          consumeLongevityPill(pill.tier, '取出前世所留');
+        } else if (pill.kind === 'cultivate') {
+          consumeCultivatePill(pill.realm, '取出前世所留');
+        }
+      });
+    }
+
+    const content = gains.length ? gains.join('，') : '空空如也';
+    addMajor(`掘出前世藏宝，获得${content}`);
+    stash.stones = 0;
+    stash.artifacts = [];
+    stash.elixirs = [];
+  });
+
+  updatePlanMode();
+}
+
+function maybeTriggerBreakthrough() {
+  const cost = stonesRequired(state.level);
+  if (state.xp >= state.xpToNext && state.spiritStones >= cost) {
+    startActivity('突破', 5);
+  }
+}
+
+function maybeDiscoverPillMerchant() {
+  const { realm, stage } = levelToRealmStage(state.level);
+  if (state.pillMerchantKnown) return;
+  if (currentLife() < 2) return;
+  if (!(realm === '练气' && stage >= 5)) return;
+  state.pillMerchantKnown = true;
+  addMajor('于坊市偶遇丹药商，得知有延寿丹、修炼丹可换取。');
+}
+
+function canUseLongevityPill(tier) {
+  const pill = LONGEVITY_ELIXIRS[tier];
+  if (!pill) return false;
+  const { realm } = levelToRealmStage(state.level);
+  if (pill.maxRealm && realmRank(realm) > realmRank(pill.maxRealm)) return false;
+  const used = state.longevityConsumed?.[tier] || 0;
+  if (used >= pill.maxCount) return false;
+  return true;
+}
+
+function consumeLongevityPill(tier, source = '服用') {
+  if (!canUseLongevityPill(tier)) return false;
+  ensureLifespan();
+  const pill = LONGEVITY_ELIXIRS[tier];
+  state.longevityConsumed[tier] = (state.longevityConsumed[tier] || 0) + 1;
+  const beforeWarn = remainingYears();
+  state.lifespanBonus += pill.bonus;
+  state.lifespanYears += pill.bonus;
+  const afterWarn = remainingYears();
+  addMajor(`${source}${pill.name}，寿元延长${pill.bonus}年`);
+  if (beforeWarn <= 10 && afterWarn > 10) {
+    state.lifespanWarned.tenYear = false;
+  }
+  return true;
+}
+
+function consumeCultivatePill(realm, source = '服用') {
+  const cfg = CULTIVATE_ELIXIR[realm];
+  if (!cfg) return false;
+  state.cultivateElixirUses[realm] = state.cultivateElixirUses[realm] || 0;
+  const count = state.cultivateElixirUses[realm];
+  const decay = 0.9 ** count;
+  const gain = cfg.add_exp * decay;
+  state.cultivateElixirUses[realm] += 1;
+  state.xp += gain;
+  clampXp();
+  addMajor(`${source}${realm}修炼丹，修为精进${gain.toFixed(0)}点`);
+  addDetail('修行', { type: 'xp', amount: gain });
+  maybeTriggerBreakthrough();
+  return true;
+}
+
+function purchaseLongevityPill(tier, { stash = false, reason = '' } = {}) {
+  const pill = LONGEVITY_ELIXIRS[tier];
+  if (!pill) return false;
+  if (!canUseLongevityPill(tier)) return false;
+  if (state.spiritStones < pill.price) return false;
+  state.spiritStones -= pill.price;
+  const intro = reason ? `${reason}，` : '';
+  if (stash) {
+    state.pills.push({ kind: 'longevity', tier });
+    addMajor(`${intro}购得${pill.name}并封存以待后世。`);
+    return true;
+  }
+  consumeLongevityPill(tier, `${intro}购得并服下`);
+  return true;
+}
+
+function purchaseCultivatePill(realm, { stash = false, reason = '' } = {}) {
+  const cfg = CULTIVATE_ELIXIR[realm];
+  if (!cfg) return false;
+  const price = cfg.price_ls;
+  if (state.spiritStones < price) return false;
+  const costAfter = state.spiritStones - price;
+  const needBreak = stonesRequired(state.level);
+  if (!stash && costAfter < needBreak) return false;
+  state.spiritStones -= price;
+  const intro = reason ? `${reason}，` : '';
+  if (stash) {
+    state.pills.push({ kind: 'cultivate', realm });
+    addMajor(`${intro}购得${realm}修炼丹后封入暗箱。`);
+    return true;
+  }
+  consumeCultivatePill(realm, `${intro}购得`);
+  return true;
+}
+
+function maybeBuyLongevityPill() {
+  if (!state.pillMerchantKnown) return false;
+  const remain = remainingYears();
+  if (!Number.isFinite(remain) || remain > 15) return false;
+  const tiers = ['large', 'medium', 'small'];
+  const choice = tiers.find((tier) => canUseLongevityPill(tier) && state.spiritStones >= LONGEVITY_ELIXIRS[tier].price);
+  if (!choice) return false;
+  const reason = remain <= 5 ? '寿元将尽' : '担心来不及冲击更高境界';
+  return purchaseLongevityPill(choice, { stash: state.planMode === '打工攒积累', reason });
+}
+
+function maybeBuyCultivationPill() {
+  if (!state.pillMerchantKnown) return false;
+  const { realm } = levelToRealmStage(state.level);
+  const cfg = CULTIVATE_ELIXIR[realm];
+  if (!cfg) return false;
+  if (state.planMode === '打工攒积累' && totalStoneWealth().total < cfg.price_ls * 3) return false;
+  const xpNeed = Math.max(0, state.xpToNext - state.xp);
+  if (xpNeed <= 0) return false;
+  const uses = state.cultivateElixirUses[realm] || 0;
+  const gain = cfg.add_exp * 0.9 ** uses;
+  if (gain < xpNeed * 0.25) return false;
+  return purchaseCultivatePill(realm, { stash: false, reason: '以丹助修' });
+}
+
+function maybeHandleElixirs() {
+  maybeDiscoverPillMerchant();
+  const boughtLongevity = maybeBuyLongevityPill();
+  const boughtCultivate = maybeBuyCultivationPill();
+  if (testMode && (boughtLongevity || boughtCultivate)) {
+    const buys = [boughtLongevity ? '延寿丹' : null, boughtCultivate ? '修炼丹' : null].filter(Boolean).join('、');
+    pushTestInfo(`丹药购买：${buys}`);
+  }
+}
+
+function maybeFirstLifeStash() {
+  if (state.reincarnation !== 0 || state.firstLifeStashSettled) return;
+  const chance = Math.random();
+  if (chance > 0.05) {
+    state.firstLifeStashSettled = true;
+    return;
+  }
+  const { realm } = levelToRealmStage(state.level);
+  const threshold = stashWealthThreshold(realm);
+  if (state.spiritStones < threshold) {
+    state.firstLifeStashSettled = true;
+    return;
+  }
+
+  createStash('一种朦胧的不安让你把少量灵石和一件小物件埋在某处，以防将来有用。', {
+    portionRange: [0.1, 0.2],
+    includeArtifactChance: 0.2,
+  });
+
+  state.firstLifeStashSettled = true;
+}
+
+function maybeAccumulateStash() {
+  if (state.planMode !== '打工攒积累') return;
+  const realm = levelToRealmStage(state.level).realm;
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const target = cfg.reward[1] * DAYS_PER_YEAR;
+  if (state.spiritStones <= target) return;
+  if (state.totalDays - state.lastStashDay < 180) return;
+
+  const ok = createStash('灵机一动，你以玉符封存部分灵石与零散物事，寄望后世再取。', {
+    portionRange: [0.3, 0.5],
+    includeArtifactChance: 0.25,
+  });
+
+  if (ok) {
+    pushTestInfo('自动藏宝：跨世积累触发');
+  }
+}
+
+function maybePrepareFinalStash(force = false) {
+  if (state.reincarnation < 1) return;
+  if (state.planMode !== '打工攒积累') return;
+  if (state.finalLegacyPrepared) return;
+  const monthThreshold = DAYS_PER_MONTH / DAYS_PER_YEAR;
+  if (!force && remainingYears() > monthThreshold) return;
+  const hasLoot =
+    state.spiritStones > 0 ||
+    (Array.isArray(state.artifacts) && state.artifacts.length > 0) ||
+    (Array.isArray(state.pills) && state.pills.length > 0);
+  if (!hasLoot) {
+    addMajor('感应末劫将临，却发现身无长物可封，唯有叹息。');
+    state.finalLegacyPrepared = true;
+    return;
+  }
+
+  const ok = createStash('劫气隐约，一月之前你已将此世所得封入秘窟，静待后世自取。', {
+    takeAll: true,
+    force: true,
+  });
+  if (ok) {
+    state.finalLegacyPrepared = true;
+  }
+}
+
+function estimateAffordableLevel(totalStones) {
+  let level = state.level;
+  let stones = totalStones;
+  while (level < TOTAL_PRE_LEVELS + 1) {
+    const cost = stonesRequired(level);
+    if (!cost || stones < cost) break;
+    stones -= cost;
+    level += 1;
+  }
+  return level;
+}
+
 function updatePlanMode() {
+  const pending = pendingStashes();
+  if (pending.length > 0) {
+    state.planMode = '修炼取宝';
+    state.planReason = '前世秘藏未取，需先稳至练气五层再议。';
+    state.planExpectationLevel = state.planExpectationLevel || state.knownMaxLevel || state.level;
+    return;
+  }
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const maxWorkReward = cfg.reward[1];
-  const stashStones = (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
-  const wealth = state.spiritStones + stashStones;
-  if (state.reincarnation >= 1 && wealth > maxWorkReward * 365) {
+  const wealthInfo = totalStoneWealth();
+  const wealth = wealthInfo.total;
+  const lifeNo = (state.reincarnation || 0) + 1;
+  const peakLevel = state.knownMaxLevel || state.level;
+  const peakRepeats = levelRepeatCount(peakLevel);
+  const lastPeak = state.lastLifePeak || peakLevel;
+  const plateau = lifeNo >= 3 && peakRepeats >= Math.max(3, lifeNo);
+  const regression = lifeNo > 1 && lastPeak < peakLevel;
+  const savingTarget = maxWorkReward * 365;
+  const predicted = estimateAffordableLevel(wealth);
+  state.planExpectationLevel = predicted;
+  const canSurpassKnown = predicted > peakLevel;
+  const abundance = wealth >= savingTarget * 2;
+
+  if (canSurpassKnown || abundance) {
+    state.planMode = '冲境界';
+    state.planReason = canSurpassKnown
+      ? `推演可至${formatLevel(predicted)}，有望超越已知巅峰${formatLevel(peakLevel)}。`
+      : '储备丰厚，不必先行打工。';
+    return;
+  }
+
+  if ((plateau || regression) && wealth < savingTarget * 2) {
     state.planMode = '打工攒积累';
+    state.planReason = '前路受阻且积蓄不足，选择静待积累。';
+  } else if (lifeNo > 1 && wealth > savingTarget) {
+    state.planMode = '冲境界';
+    state.planReason = '跨世积累尚可，先试冲击旧巅峰。';
   } else {
     state.planMode = '冲境界';
+    state.planReason = '正常修行推进境界。';
   }
+}
+
+function shouldAccumulateWork() {
+  if (state.planMode !== '打工攒积累') return false;
+  const realm = levelToRealmStage(state.level).realm;
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const maxWorkReward = cfg.reward[1];
+  const wealth = totalStoneWealth().total;
+  const savingTarget = maxWorkReward * 365;
+  const belowSavings = wealth < savingTarget;
+  const abundance = wealth >= savingTarget * 2;
+  const lifeNo = (state.reincarnation || 0) + 1;
+  const laggingBehind = lifeNo > 1 && state.bestLevelThisLife < (state.knownMaxLevel || 1);
+  if (abundance) return false;
+  return belowSavings || laggingBehind;
 }
 
 function rollBaseLifespan() {
@@ -801,9 +1288,15 @@ function checkLifespanWarnings() {
     addMajor('模糊感知寿元将尽，也许只剩一年。');
     state.lifespanWarned.finalYear = true;
   }
+  if (state.reincarnation === 0 && remain <= 1) {
+    maybeFirstLifeStash();
+  }
   if (state.reincarnation > 0 && !state.lifespanWarned.tenYear && remain <= 10) {
     addMajor('不知为何，你清晰感知到自己的大限将至，大约还有十年。');
     state.lifespanWarned.tenYear = true;
+  }
+  if (state.reincarnation > 0) {
+    maybePrepareFinalStash();
   }
   if (remain <= 0) {
     handleDeath('寿元耗尽，坐化而逝');
@@ -1040,6 +1533,11 @@ function loadState() {
       state.artifacts = state.artifacts.map(withArtifactMeta).slice(0, MAX_ARTIFACTS);
       if (typeof state.lifeDays !== 'number') state.lifeDays = state.totalDays;
       if (!Array.isArray(state.stashes)) state.stashes = [];
+      state.stashes = state.stashes.map((s) => ({ ...s, elixirs: Array.isArray(s.elixirs) ? s.elixirs : [] }));
+      if (typeof state.lastStashDay !== 'number') state.lastStashDay = 0;
+      if (typeof state.lastTheftRollLife !== 'number') state.lastTheftRollLife = 0;
+      if (typeof state.lastStashReminderLife !== 'number') state.lastStashReminderLife = 0;
+      if (typeof state.firstLifeStashSettled !== 'boolean') state.firstLifeStashSettled = false;
       ensureLifespan();
       if (!state.prevActivity) state.prevActivity = '修行';
       if (!state.battle) state.battle = null;
@@ -1047,10 +1545,23 @@ function loadState() {
       if (typeof state.cautionDeaths !== 'number') state.cautionDeaths = 0;
       if (!state.levelRepeats || typeof state.levelRepeats !== 'object') state.levelRepeats = {};
       if (!state.planMode) state.planMode = '冲境界';
+      if (!state.planReason) state.planReason = '初始设定：以突破为先。';
+      if (!state.planExpectationLevel) state.planExpectationLevel = state.knownMaxLevel || state.level;
       if (!state.knownMaxLevel || state.knownMaxLevel < state.level) {
         state.knownMaxLevel = state.level;
       }
       if (!state.workPlan) state.workPlan = null;
+      if (!state.bestLevelThisLife || state.bestLevelThisLife < 1) state.bestLevelThisLife = state.level;
+      if (!state.lastLifePeak) state.lastLifePeak = 0;
+      if (typeof state.finalLegacyPrepared !== 'boolean') state.finalLegacyPrepared = false;
+      if (typeof state.pillMerchantKnown !== 'boolean') state.pillMerchantKnown = false;
+      if (!state.longevityConsumed || typeof state.longevityConsumed !== 'object') {
+        state.longevityConsumed = { small: 0, medium: 0, large: 0 };
+      }
+      if (!state.cultivateElixirUses || typeof state.cultivateElixirUses !== 'object') {
+        state.cultivateElixirUses = {};
+      }
+      if (!Array.isArray(state.pills)) state.pills = [];
       ensureLevelEntry(state.level);
       state.xpToNext = requiredXp(state.level);
       if (state.activity === '打工') {
@@ -1063,6 +1574,9 @@ function loadState() {
         }
       }
       updatePlanMode();
+      rollStashTheft();
+      remindStashMemory();
+      maybeOpenStashes();
     } catch (err) {
       console.warn('Failed to load save', err);
     }
@@ -1146,10 +1660,13 @@ function aiInsights() {
   const remain = remainingYears();
   const remainText = Number.isFinite(state.lifespanYears) ? `${Math.max(0, Math.floor(remain))}年` : '无上限';
   const stashInfo = `${(state.stashes || []).length}处藏宝`;
-  const resourceLine = `灵石${state.spiritStones.toFixed(0)}，灵宝${state.artifacts.length}`;
+  const wealth = totalStoneWealth();
+  const resourceLine = `灵石${wealth.total.toFixed(0)}（身上${wealth.carried.toFixed(0)}，藏${wealth.stash.toFixed(0)}），灵宝${state.artifacts.length}`;
+  const expectation = formatLevel(state.planExpectationLevel || state.knownMaxLevel || state.level);
   return [
     `轻智能：第${lifeNo}世 · 策略：${state.planMode} · 已知最高：${highest}`,
     `寿元预估：${remainText} · 资源：${resourceLine} · 藏宝：${stashInfo}`,
+    `策略依据：预估可冲至${expectation}，因：${state.planReason}`,
   ];
 }
 
@@ -1264,7 +1781,7 @@ function sendNotification() {
     Notification.requestPermission().then((res) => {
       if (res === 'granted') {
         new Notification('番茄钟完成', {
-          body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注',
+          body: pomodoro.mode === 'work' ? '专注时间结束' : '休息时间结束',
           silent: true,
         });
       } else {
@@ -1277,7 +1794,7 @@ function sendNotification() {
   }
   if (Notification.permission === 'granted') {
     new Notification('番茄钟完成', {
-      body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注',
+      body: pomodoro.mode === 'work' ? '专注时间结束' : '休息时间结束',
       silent: true,
     });
   }
@@ -1416,6 +1933,7 @@ function levelUp() {
   state.level += 1;
   registerLevelEntry(state.level);
   state.knownMaxLevel = Math.max(state.knownMaxLevel || state.level, state.level);
+  state.bestLevelThisLife = Math.max(state.bestLevelThisLife || state.level, state.level);
   updatePlanMode();
   state.xp = Math.max(0, state.xp - spentXp);
   state.xpToNext = requiredXp(state.level);
@@ -1428,6 +1946,7 @@ function levelUp() {
   }
   state.mood = Math.min(state.mood + 10, 100);
   addMajor(`突破至${formatLevel(state.level)}`);
+  maybeOpenStashes();
 }
 
 function handleCultivation(action) {
@@ -1439,6 +1958,11 @@ function handleCultivation(action) {
   clampXp();
   const delta = Math.max(0, state.xp - before);
   addDetail(action, { type: 'xp', amount: delta });
+
+  if (shouldAccumulateWork()) {
+    startActivity('打工', 8);
+    return;
+  }
 
   if (state.mood < 50 && moodTier() >= 8) {
     startActivity('调心', 6);
@@ -1826,12 +2350,14 @@ function maybeFindStones(action) {
 }
 
 function handleDeath(reason) {
+  maybePrepareFinalStash(true);
   addMajor(`死亡：${reason}`);
   const deathAgeYears = Math.max(1, Math.floor(state.lifeDays / DAYS_PER_YEAR));
   cautionStep(deathAgeYears);
   if (state.artifacts.length) {
     addMajor('身死道消，随身天道灵宝散去');
   }
+  const lastLifePeak = state.bestLevelThisLife || state.level;
   state.reincarnation += 1;
   const lifeNo = state.reincarnation + 1;
   const sect = randomSect();
@@ -1868,22 +2394,34 @@ function handleDeath(reason) {
     reincarnation: state.reincarnation,
     artifacts: [],
     stashes: keepStashes,
+    lastStashDay: 0,
+    lastTheftRollLife: state.lastTheftRollLife,
+    lastStashReminderLife: state.lastStashReminderLife,
+    firstLifeStashSettled: state.firstLifeStashSettled,
+    bestLevelThisLife: 1,
+    lastLifePeak: lastLifePeak,
     lifespanBase: newBase,
     lifespanBonus: 0,
     lifespanYears: newBase,
     lifespanApplied: {},
     lifespanWarned: { finalYear: false, tenYear: false },
+    pillMerchantKnown: state.pillMerchantKnown,
+    longevityConsumed: { small: 0, medium: 0, large: 0 },
+    cultivateElixirUses: {},
+    pills: [],
     battle: null,
     prevActivity: '修行',
     caution: state.caution,
     cautionDeaths: state.cautionDeaths,
     levelRepeats: keepRepeats,
+    finalLegacyPrepared: false,
   });
   registerLevelEntry(1);
   const { finalDay, ageDays } = narrateRebirth(sect, keepTotal);
   addMajor(`转生轮回，第${lifeNo}世。${sect}弟子将于八岁觉醒记忆。`);
   state.totalDays = finalDay;
   state.lifeDays = ageDays;
+  remindStashMemory();
   updatePlanMode();
 }
 
@@ -1984,6 +2522,8 @@ function tickDay() {
   }
   handleMoodCollapse();
 
+  maybeHandleElixirs();
+  maybeAccumulateStash();
   checkLifespanWarnings();
 
   clampXp();
@@ -2053,6 +2593,8 @@ function resetAll() {
     pendingWorkReward: 0,
     workStreak: 0,
     cultivateStreak: 0,
+    planMode: '冲境界',
+    knownMaxLevel: 1,
     condition: '正常',
     healTimer: 0,
     nearDeathTimer: 0,
@@ -2061,16 +2603,27 @@ function resetAll() {
     reincarnation: 0,
     artifacts: [],
     stashes: [],
+    lastStashDay: 0,
+    lastTheftRollLife: 0,
+    lastStashReminderLife: 0,
+    firstLifeStashSettled: false,
+    bestLevelThisLife: 1,
+    lastLifePeak: 0,
     lifespanBase: rollBaseLifespan(),
     lifespanBonus: 0,
     lifespanYears: 0,
     lifespanApplied: {},
     lifespanWarned: { finalYear: false, tenYear: false },
+    pillMerchantKnown: false,
+    longevityConsumed: { small: 0, medium: 0, large: 0 },
+    cultivateElixirUses: {},
+    pills: [],
     battle: null,
     prevActivity: '修行',
     caution: 100,
     cautionDeaths: 0,
     levelRepeats: { 1: 1 },
+    finalLegacyPrepared: false,
   });
 
   state.lifespanYears = state.lifespanBase;
@@ -2170,6 +2723,26 @@ function setupEvents() {
       return;
     }
     handleFortuity(true);
+  });
+
+  ui.stashTest.addEventListener('click', () => {
+    if (!testMode) {
+      alert('请在控制台输入 testmode("password") 开启测试模式');
+      return;
+    }
+    const ok = createStash('测试藏宝：手动埋下资源。', {
+      portionRange: [0.3, 0.5],
+      includeArtifactChance: 0.5,
+      force: false,
+    });
+    if (!ok) {
+      pushTestInfo('无可藏宝物。');
+      addMajor('翻遍行囊，发现无可藏宝之物。');
+    } else {
+      pushTestInfo('手动触发藏宝，等待下一世开启。');
+      saveState();
+      updateUI();
+    }
   });
 
   ui.tabButtons.forEach((btn) => {

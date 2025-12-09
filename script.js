@@ -164,6 +164,8 @@ const state = {
   cautionDeaths: 0,
   levelRepeats: { 1: 1 },
   finalLegacyPrepared: false,
+  planReason: '初始设定：以突破为先。',
+  planExpectationLevel: null,
 };
 
 ensureLifespan();
@@ -824,6 +826,16 @@ function pendingStashes() {
   return (state.stashes || []).filter((stash) => !stash.opened && stash.createdLife < life);
 }
 
+function stashStoneSum() {
+  return (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
+}
+
+function totalStoneWealth() {
+  const stash = stashStoneSum();
+  const carried = state.spiritStones || 0;
+  return { total: carried + stash, stash, carried };
+}
+
 function rollStashTheft() {
   const life = currentLife();
   if (state.lastTheftRollLife === life) return;
@@ -952,17 +964,31 @@ function maybePrepareFinalStash(force = false) {
   }
 }
 
+function estimateAffordableLevel(totalStones) {
+  let level = state.level;
+  let stones = totalStones;
+  while (level < TOTAL_PRE_LEVELS + 1) {
+    const cost = stonesRequired(level);
+    if (!cost || stones < cost) break;
+    stones -= cost;
+    level += 1;
+  }
+  return level;
+}
+
 function updatePlanMode() {
   const pending = pendingStashes();
   if (pending.length > 0) {
     state.planMode = '修炼取宝';
+    state.planReason = '前世秘藏未取，需先稳至练气五层再议。';
+    state.planExpectationLevel = state.planExpectationLevel || state.knownMaxLevel || state.level;
     return;
   }
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const maxWorkReward = cfg.reward[1];
-  const stashStones = (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
-  const wealth = state.spiritStones + stashStones;
+  const wealthInfo = totalStoneWealth();
+  const wealth = wealthInfo.total;
   const lifeNo = (state.reincarnation || 0) + 1;
   const peakLevel = state.knownMaxLevel || state.level;
   const peakRepeats = levelRepeatCount(peakLevel);
@@ -970,14 +996,28 @@ function updatePlanMode() {
   const plateau = lifeNo >= 3 && peakRepeats >= Math.max(3, lifeNo);
   const regression = lifeNo > 1 && lastPeak < peakLevel;
   const savingTarget = maxWorkReward * 365;
-  const hasSurplus = wealth > savingTarget;
+  const predicted = estimateAffordableLevel(wealth);
+  state.planExpectationLevel = predicted;
+  const canSurpassKnown = predicted > peakLevel;
+  const abundance = wealth >= savingTarget * 2;
+
+  if (canSurpassKnown || abundance) {
+    state.planMode = '冲境界';
+    state.planReason = canSurpassKnown
+      ? `推演可至${formatLevel(predicted)}，有望超越已知巅峰${formatLevel(peakLevel)}。`
+      : '储备丰厚，不必先行打工。';
+    return;
+  }
 
   if ((plateau || regression) && wealth < savingTarget * 2) {
     state.planMode = '打工攒积累';
-  } else if (lifeNo > 1 && hasSurplus) {
-    state.planMode = '打工攒积累';
+    state.planReason = '前路受阻且积蓄不足，选择静待积累。';
+  } else if (lifeNo > 1 && wealth > savingTarget) {
+    state.planMode = '冲境界';
+    state.planReason = '跨世积累尚可，先试冲击旧巅峰。';
   } else {
     state.planMode = '冲境界';
+    state.planReason = '正常修行推进境界。';
   }
 }
 
@@ -986,12 +1026,13 @@ function shouldAccumulateWork() {
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const maxWorkReward = cfg.reward[1];
-  const stashStones = (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
-  const wealth = state.spiritStones + stashStones;
+  const wealth = totalStoneWealth().total;
   const savingTarget = maxWorkReward * 365;
   const belowSavings = wealth < savingTarget;
+  const abundance = wealth >= savingTarget * 2;
   const lifeNo = (state.reincarnation || 0) + 1;
   const laggingBehind = lifeNo > 1 && state.bestLevelThisLife < (state.knownMaxLevel || 1);
+  if (abundance) return false;
   return belowSavings || laggingBehind;
 }
 
@@ -1301,6 +1342,8 @@ function loadState() {
       if (typeof state.cautionDeaths !== 'number') state.cautionDeaths = 0;
       if (!state.levelRepeats || typeof state.levelRepeats !== 'object') state.levelRepeats = {};
       if (!state.planMode) state.planMode = '冲境界';
+      if (!state.planReason) state.planReason = '初始设定：以突破为先。';
+      if (!state.planExpectationLevel) state.planExpectationLevel = state.knownMaxLevel || state.level;
       if (!state.knownMaxLevel || state.knownMaxLevel < state.level) {
         state.knownMaxLevel = state.level;
       }
@@ -1406,10 +1449,13 @@ function aiInsights() {
   const remain = remainingYears();
   const remainText = Number.isFinite(state.lifespanYears) ? `${Math.max(0, Math.floor(remain))}年` : '无上限';
   const stashInfo = `${(state.stashes || []).length}处藏宝`;
-  const resourceLine = `灵石${state.spiritStones.toFixed(0)}，灵宝${state.artifacts.length}`;
+  const wealth = totalStoneWealth();
+  const resourceLine = `灵石${wealth.total.toFixed(0)}（身上${wealth.carried.toFixed(0)}，藏${wealth.stash.toFixed(0)}），灵宝${state.artifacts.length}`;
+  const expectation = formatLevel(state.planExpectationLevel || state.knownMaxLevel || state.level);
   return [
     `轻智能：第${lifeNo}世 · 策略：${state.planMode} · 已知最高：${highest}`,
     `寿元预估：${remainText} · 资源：${resourceLine} · 藏宝：${stashInfo}`,
+    `策略依据：预估可冲至${expectation}，因：${state.planReason}`,
   ];
 }
 

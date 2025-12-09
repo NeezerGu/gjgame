@@ -188,6 +188,7 @@ const state = {
   finalLegacyPrepared: false,
   planReason: '初始设定：以突破为先。',
   planExpectationLevel: null,
+  planLockedLife: null,
 };
 
 ensureLifespan();
@@ -1066,38 +1067,59 @@ function purchaseCultivatePill(realm, { stash = false, reason = '' } = {}) {
   return true;
 }
 
-function maybeBuyLongevityPill() {
-  if (!state.pillMerchantKnown) return false;
+function bestLongevityOption() {
+  if (!state.pillMerchantKnown) return null;
   const remain = remainingYears();
-  if (!Number.isFinite(remain) || remain > 15) return false;
+  if (!Number.isFinite(remain) || remain > 15) return null;
   const tiers = ['large', 'medium', 'small'];
-  const choice = tiers.find((tier) => canUseLongevityPill(tier) && state.spiritStones >= LONGEVITY_ELIXIRS[tier].price);
-  if (!choice) return false;
+  const candidates = tiers
+    .filter((tier) => canUseLongevityPill(tier) && state.spiritStones >= LONGEVITY_ELIXIRS[tier].price)
+    .map((tier) => {
+      const pill = LONGEVITY_ELIXIRS[tier];
+      return {
+        tier,
+        ratio: pill.bonus / pill.price,
+        pill,
+      };
+    });
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.ratio - a.ratio);
+  const best = candidates[0];
   const reason = remain <= 5 ? '寿元将尽' : '担心来不及冲击更高境界';
-  return purchaseLongevityPill(choice, { stash: state.planMode === '打工攒积累', reason });
+  return {
+    value: best.ratio,
+    name: best.pill.name,
+    buy: () => purchaseLongevityPill(best.tier, { stash: state.planMode === '打工攒积累', reason }),
+  };
 }
 
-function maybeBuyCultivationPill() {
-  if (!state.pillMerchantKnown) return false;
+function bestCultivateOption() {
+  if (!state.pillMerchantKnown) return null;
   const { realm } = levelToRealmStage(state.level);
   const cfg = CULTIVATE_ELIXIR[realm];
-  if (!cfg) return false;
-  if (state.planMode === '打工攒积累' && totalStoneWealth().total < cfg.price_ls * 3) return false;
+  if (!cfg) return null;
+  if (state.planMode === '打工攒积累' && totalStoneWealth().total < cfg.price_ls * 3) return null;
   const xpNeed = Math.max(0, state.xpToNext - state.xp);
-  if (xpNeed <= 0) return false;
+  if (xpNeed <= 0) return null;
   const uses = state.cultivateElixirUses[realm] || 0;
   const gain = cfg.add_exp * 0.9 ** uses;
-  if (gain < xpNeed * 0.25) return false;
-  return purchaseCultivatePill(realm, { stash: false, reason: '以丹助修' });
+  if (gain < xpNeed * 0.25) return null;
+  return {
+    value: gain / cfg.price_ls,
+    name: `${realm}修炼丹`,
+    buy: () => purchaseCultivatePill(realm, { stash: false, reason: '以丹助修' }),
+  };
 }
 
 function maybeHandleElixirs() {
   maybeDiscoverPillMerchant();
-  const boughtLongevity = maybeBuyLongevityPill();
-  const boughtCultivate = maybeBuyCultivationPill();
-  if (testMode && (boughtLongevity || boughtCultivate)) {
-    const buys = [boughtLongevity ? '延寿丹' : null, boughtCultivate ? '修炼丹' : null].filter(Boolean).join('、');
-    pushTestInfo(`丹药购买：${buys}`);
+  const options = [bestLongevityOption(), bestCultivateOption()].filter(Boolean);
+  if (!options.length) return;
+  options.sort((a, b) => b.value - a.value);
+  const chosen = options[0];
+  const bought = chosen.buy();
+  if (testMode && bought) {
+    pushTestInfo(`丹药购买：${chosen.name}`);
   }
 }
 
@@ -1178,7 +1200,14 @@ function estimateAffordableLevel(totalStones) {
   return level;
 }
 
+function accessibleWealth() {
+  const { realm, stage } = levelToRealmStage(state.level);
+  const stash = realm === '练气' && stage < 5 ? 0 : stashStoneSum();
+  return state.spiritStones + stash;
+}
+
 function updatePlanMode() {
+  const life = currentLife();
   const pending = pendingStashes();
   if (pending.length > 0) {
     state.planMode = '修炼取宝';
@@ -1186,11 +1215,12 @@ function updatePlanMode() {
     state.planExpectationLevel = state.planExpectationLevel || state.knownMaxLevel || state.level;
     return;
   }
-  const realm = levelToRealmStage(state.level).realm;
+  const { realm, stage } = levelToRealmStage(state.level);
+  if (stage < 5) return;
+  if (state.planLockedLife === life) return;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const maxWorkReward = cfg.reward[1];
-  const wealthInfo = totalStoneWealth();
-  const wealth = wealthInfo.total;
+  const wealth = accessibleWealth();
   const lifeNo = (state.reincarnation || 0) + 1;
   const peakLevel = state.knownMaxLevel || state.level;
   const peakRepeats = levelRepeatCount(peakLevel);
@@ -1221,6 +1251,8 @@ function updatePlanMode() {
     state.planMode = '冲境界';
     state.planReason = '正常修行推进境界。';
   }
+
+  state.planLockedLife = life;
 }
 
 function shouldAccumulateWork() {
@@ -1253,7 +1285,8 @@ function ensureLifespan() {
 
 function remainingYears() {
   const ageYears = Math.floor(state.lifeDays / DAYS_PER_YEAR);
-  return (state.lifespanYears || 0) - ageYears;
+  const effectiveAge = Math.max(0, ageYears - START_AGE_YEARS);
+  return (state.lifespanYears || 0) - effectiveAge;
 }
 
 function applyLongevity(realm) {
@@ -1282,7 +1315,7 @@ function applyLongevity(realm) {
 function checkLifespanWarnings() {
   ensureLifespan();
   if (!Number.isFinite(state.lifespanYears)) return;
-  const ageYears = Math.floor(state.lifeDays / DAYS_PER_YEAR);
+  const ageYears = Math.max(0, Math.floor(state.lifeDays / DAYS_PER_YEAR) - START_AGE_YEARS);
   const remain = state.lifespanYears - ageYears;
   if (state.reincarnation === 0 && !state.lifespanWarned.finalYear && remain <= 1) {
     addMajor('模糊感知寿元将尽，也许只剩一年。');
@@ -1547,6 +1580,7 @@ function loadState() {
       if (!state.planMode) state.planMode = '冲境界';
       if (!state.planReason) state.planReason = '初始设定：以突破为先。';
       if (!state.planExpectationLevel) state.planExpectationLevel = state.knownMaxLevel || state.level;
+      if (typeof state.planLockedLife !== 'number') state.planLockedLife = null;
       if (!state.knownMaxLevel || state.knownMaxLevel < state.level) {
         state.knownMaxLevel = state.level;
       }
@@ -1659,7 +1693,7 @@ function aiInsights() {
   const highest = formatLevel(state.knownMaxLevel || state.level);
   const remain = remainingYears();
   const remainText = Number.isFinite(state.lifespanYears) ? `${Math.max(0, Math.floor(remain))}年` : '无上限';
-  const stashInfo = `${(state.stashes || []).length}处藏宝`;
+  const stashInfo = `${pendingStashes().length}处藏宝`;
   const wealth = totalStoneWealth();
   const resourceLine = `灵石${wealth.total.toFixed(0)}（身上${wealth.carried.toFixed(0)}，藏${wealth.stash.toFixed(0)}），灵宝${state.artifacts.length}`;
   const expectation = formatLevel(state.planExpectationLevel || state.knownMaxLevel || state.level);
@@ -2385,6 +2419,7 @@ function handleDeath(reason) {
     workStreak: 0,
     cultivateStreak: 0,
     planMode: keepPlan,
+    planLockedLife: null,
     knownMaxLevel: knownMax,
     condition: '正常',
     healTimer: 0,
@@ -2594,6 +2629,7 @@ function resetAll() {
     workStreak: 0,
     cultivateStreak: 0,
     planMode: '冲境界',
+    planLockedLife: null,
     knownMaxLevel: 1,
     condition: '正常',
     healTimer: 0,

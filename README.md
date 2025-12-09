@@ -13,3 +13,12 @@
 2. 下载本仓库后，直接双击 `index.html` 或使用本地服务器打开即可体验。
 
 > 初版为纯前端实现，后续可接入存档、音效、成就、Steam SDK 等功能。
+
+## Electron 封装运行
+希望以桌面程序形式体验或打包 Windows 可执行文件，可按以下步骤操作：
+
+1. 安装依赖：`npm install`
+2. 直接启动桌面版：`npm start`
+3. 打包为 Windows 可执行文件：`npm run electron:package`（产物在 `dist/` 目录下）
+
+> Electron 脚本会直接加载仓库内的 `index.html`，无需额外服务端。

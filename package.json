@@ -1,0 +1,15 @@
+{
+  "name": "gjgame",
+  "version": "1.0.0",
+  "description": "Idle cultivation game with an Electron wrapper for desktop use.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "electron:start": "electron .",
+    "electron:package": "electron-packager . gjgame --platform=win32 --arch=x64 --out=dist --overwrite"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-packager": "^17.1.2"
+  }
+}

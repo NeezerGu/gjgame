@@ -146,6 +146,8 @@ const state = {
   reincarnation: 0,
   artifacts: [],
   stashes: [],
+  bestLevelThisLife: 1,
+  lastLifePeak: 0,
   lifespanBase: 0,
   lifespanYears: 0,
   lifespanBonus: 0,
@@ -744,11 +746,36 @@ function updatePlanMode() {
   const maxWorkReward = cfg.reward[1];
   const stashStones = (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
   const wealth = state.spiritStones + stashStones;
-  if (state.reincarnation >= 1 && wealth > maxWorkReward * 365) {
+  const lifeNo = (state.reincarnation || 0) + 1;
+  const peakLevel = state.knownMaxLevel || state.level;
+  const peakRepeats = levelRepeatCount(peakLevel);
+  const lastPeak = state.lastLifePeak || peakLevel;
+  const plateau = lifeNo >= 3 && peakRepeats >= Math.max(3, lifeNo);
+  const regression = lifeNo > 1 && lastPeak < peakLevel;
+  const savingTarget = maxWorkReward * 365;
+  const hasSurplus = wealth > savingTarget;
+
+  if ((plateau || regression) && wealth < savingTarget * 2) {
+    state.planMode = '打工攒积累';
+  } else if (lifeNo > 1 && hasSurplus) {
     state.planMode = '打工攒积累';
   } else {
     state.planMode = '冲境界';
   }
+}
+
+function shouldAccumulateWork() {
+  if (state.planMode !== '打工攒积累') return false;
+  const realm = levelToRealmStage(state.level).realm;
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const maxWorkReward = cfg.reward[1];
+  const stashStones = (state.stashes || []).reduce((sum, s) => sum + (s.stones || 0), 0);
+  const wealth = state.spiritStones + stashStones;
+  const savingTarget = maxWorkReward * 365;
+  const belowSavings = wealth < savingTarget;
+  const lifeNo = (state.reincarnation || 0) + 1;
+  const laggingBehind = lifeNo > 1 && state.bestLevelThisLife < (state.knownMaxLevel || 1);
+  return belowSavings || laggingBehind;
 }
 
 function rollBaseLifespan() {
@@ -1051,6 +1078,8 @@ function loadState() {
         state.knownMaxLevel = state.level;
       }
       if (!state.workPlan) state.workPlan = null;
+      if (!state.bestLevelThisLife || state.bestLevelThisLife < 1) state.bestLevelThisLife = state.level;
+      if (!state.lastLifePeak) state.lastLifePeak = 0;
       ensureLevelEntry(state.level);
       state.xpToNext = requiredXp(state.level);
       if (state.activity === '打工') {
@@ -1264,7 +1293,7 @@ function sendNotification() {
     Notification.requestPermission().then((res) => {
       if (res === 'granted') {
         new Notification('番茄钟完成', {
-          body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注',
+          body: pomodoro.mode === 'work' ? '专注时间结束' : '休息时间结束',
           silent: true,
         });
       } else {
@@ -1277,7 +1306,7 @@ function sendNotification() {
   }
   if (Notification.permission === 'granted') {
     new Notification('番茄钟完成', {
-      body: pomodoro.mode === 'work' ? '进入休息时间' : '开始新一轮专注',
+      body: pomodoro.mode === 'work' ? '专注时间结束' : '休息时间结束',
       silent: true,
     });
   }
@@ -1416,6 +1445,7 @@ function levelUp() {
   state.level += 1;
   registerLevelEntry(state.level);
   state.knownMaxLevel = Math.max(state.knownMaxLevel || state.level, state.level);
+  state.bestLevelThisLife = Math.max(state.bestLevelThisLife || state.level, state.level);
   updatePlanMode();
   state.xp = Math.max(0, state.xp - spentXp);
   state.xpToNext = requiredXp(state.level);
@@ -1439,6 +1469,11 @@ function handleCultivation(action) {
   clampXp();
   const delta = Math.max(0, state.xp - before);
   addDetail(action, { type: 'xp', amount: delta });
+
+  if (shouldAccumulateWork()) {
+    startActivity('打工', 8);
+    return;
+  }
 
   if (state.mood < 50 && moodTier() >= 8) {
     startActivity('调心', 6);
@@ -1832,6 +1867,7 @@ function handleDeath(reason) {
   if (state.artifacts.length) {
     addMajor('身死道消，随身天道灵宝散去');
   }
+  const lastLifePeak = state.bestLevelThisLife || state.level;
   state.reincarnation += 1;
   const lifeNo = state.reincarnation + 1;
   const sect = randomSect();
@@ -1868,6 +1904,8 @@ function handleDeath(reason) {
     reincarnation: state.reincarnation,
     artifacts: [],
     stashes: keepStashes,
+    bestLevelThisLife: 1,
+    lastLifePeak: lastLifePeak,
     lifespanBase: newBase,
     lifespanBonus: 0,
     lifespanYears: newBase,
@@ -2061,6 +2099,8 @@ function resetAll() {
     reincarnation: 0,
     artifacts: [],
     stashes: [],
+    bestLevelThisLife: 1,
+    lastLifePeak: 0,
     lifespanBase: rollBaseLifespan(),
     lifespanBonus: 0,
     lifespanYears: 0,

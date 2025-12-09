@@ -31,6 +31,7 @@ const ui = {
   cautionDeathsInput: document.getElementById('cautionDeaths'),
   cautionSetBtn: document.getElementById('setCaution'),
   resetAllBtn: document.getElementById('resetAll'),
+  stashTest: document.getElementById('stashTest'),
 };
 
 const STORAGE_KEY = 'idle-cultivation-save-v2';
@@ -146,6 +147,10 @@ const state = {
   reincarnation: 0,
   artifacts: [],
   stashes: [],
+  lastStashDay: 0,
+  lastTheftRollLife: 0,
+  lastStashReminderLife: 0,
+  firstLifeStashSettled: false,
   bestLevelThisLife: 1,
   lastLifePeak: 0,
   lifespanBase: 0,
@@ -740,6 +745,174 @@ function cautionStep(ageYears) {
   addMajor('生死一遭，道心更慎，行事愈加小心翼翼');
 }
 
+function currentLife() {
+  return (state.reincarnation || 0) + 1;
+}
+
+function stashWealthThreshold(realm) {
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const maxReward = cfg.reward[1];
+  const avgDuration = Math.max(1, (cfg.duration[0] + cfg.duration[1]) / 2);
+  const yearlyReward = maxReward * (DAYS_PER_YEAR / avgDuration);
+  return yearlyReward * randRange(5, 10);
+}
+
+function describeStashContents(stash) {
+  const parts = [];
+  if (stash.stones > 0) parts.push(`${stash.stones}枚灵石`);
+  if (Array.isArray(stash.artifacts) && stash.artifacts.length) {
+    const names = stash.artifacts.map((a) => `「${a.name}」`);
+    parts.push(`天道灵宝${names.join('、')}`);
+  }
+  return parts.join('和') || '一些不起眼的小物件';
+}
+
+function createStash(reason, options = {}) {
+  const { portionRange = [0.3, 0.5], includeArtifactChance = 0.15, force = false } = options;
+  const min = Math.max(0, portionRange[0]);
+  const max = Math.max(min, portionRange[1]);
+  const fraction = min + Math.random() * (max - min);
+  const stones = Math.floor(state.spiritStones * fraction);
+  const stashArtifacts = [];
+
+  if (state.artifacts.length > 1 && Math.random() < includeArtifactChance) {
+    const idx = Math.floor(Math.random() * state.artifacts.length);
+    const [artifact] = state.artifacts.splice(idx, 1);
+    stashArtifacts.push(artifact);
+  }
+
+  if (!force && stones <= 0 && stashArtifacts.length === 0) return false;
+
+  if (stones > 0) {
+    state.spiritStones -= stones;
+  }
+
+  const stash = {
+    id: `stash-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    createdLife: currentLife(),
+    stones,
+    artifacts: stashArtifacts,
+    stolen: false,
+    opened: false,
+    openedLife: null,
+  };
+
+  state.stashes.push(stash);
+  const contentText = describeStashContents(stash);
+  addMajor(reason || `你悄然将${contentText}埋入隐蔽之所，以备后用。`);
+  state.lastStashDay = Math.floor(state.totalDays);
+  return true;
+}
+
+function pendingStashes() {
+  const life = currentLife();
+  return (state.stashes || []).filter((stash) => !stash.opened && stash.createdLife < life);
+}
+
+function rollStashTheft() {
+  const life = currentLife();
+  if (state.lastTheftRollLife === life) return;
+  state.lastTheftRollLife = life;
+  state.stashes = (state.stashes || []).map((stash) => {
+    if (stash.opened || stash.createdLife >= life) return stash;
+    const stolen = stash.stolen || Math.random() < 0.05;
+    return { ...stash, stolen };
+  });
+}
+
+function remindStashMemory() {
+  const life = currentLife();
+  rollStashTheft();
+  if (state.lastStashReminderLife === life) return;
+  const pending = pendingStashes();
+  if (pending.length > 0) {
+    addMajor('前世藏宝的记忆浮现，决心至练气五层后再去寻回。');
+    state.lastStashReminderLife = life;
+  }
+}
+
+function maybeOpenStashes() {
+  const { realm, stage } = levelToRealmStage(state.level);
+  if (realm === '练气' && stage < 5) return;
+  const life = currentLife();
+  const available = pendingStashes();
+  if (!available.length) return;
+
+  available.forEach((stash) => {
+    stash.opened = true;
+    stash.openedLife = life;
+    if (stash.stolen) {
+      addMajor('记忆中的藏宝已被人捷足先登，空余旧坑。');
+      return;
+    }
+
+    const gains = [];
+    if (stash.stones > 0) {
+      state.spiritStones += stash.stones;
+      gains.push(`${stash.stones}枚灵石`);
+    }
+
+    if (Array.isArray(stash.artifacts) && stash.artifacts.length) {
+      const restored = [];
+      stash.artifacts.forEach((item) => {
+        const artifact = withArtifactMeta(item);
+        if (state.artifacts.length < MAX_ARTIFACTS) {
+          state.artifacts.push(artifact);
+          restored.push(`「${artifact.name}」`);
+        }
+      });
+      if (restored.length) {
+        gains.push(`天道灵宝${restored.join('、')}`);
+      }
+    }
+
+    const content = gains.length ? gains.join('，') : '空空如也';
+    addMajor(`掘出前世藏宝，获得${content}`);
+    stash.stones = 0;
+    stash.artifacts = [];
+  });
+}
+
+function maybeFirstLifeStash() {
+  if (state.reincarnation !== 0 || state.firstLifeStashSettled) return;
+  const chance = Math.random();
+  if (chance > 0.05) {
+    state.firstLifeStashSettled = true;
+    return;
+  }
+  const { realm } = levelToRealmStage(state.level);
+  const threshold = stashWealthThreshold(realm);
+  if (state.spiritStones < threshold) {
+    state.firstLifeStashSettled = true;
+    return;
+  }
+
+  createStash('一种朦胧的不安让你把少量灵石和一件小物件埋在某处，以防将来有用。', {
+    portionRange: [0.1, 0.2],
+    includeArtifactChance: 0.2,
+  });
+
+  state.firstLifeStashSettled = true;
+}
+
+function maybeAccumulateStash() {
+  if (state.planMode !== '打工攒积累') return;
+  const realm = levelToRealmStage(state.level).realm;
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const target = cfg.reward[1] * DAYS_PER_YEAR;
+  if (state.spiritStones <= target) return;
+  if (state.totalDays - state.lastStashDay < 180) return;
+
+  const ok = createStash('担心风险，你预留一批灵石跨世存放。', {
+    portionRange: [0.3, 0.5],
+    includeArtifactChance: 0.25,
+  });
+
+  if (ok) {
+    pushTestInfo('自动藏宝：跨世积累触发');
+  }
+}
+
 function updatePlanMode() {
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
@@ -827,6 +1000,9 @@ function checkLifespanWarnings() {
   if (state.reincarnation === 0 && !state.lifespanWarned.finalYear && remain <= 1) {
     addMajor('模糊感知寿元将尽，也许只剩一年。');
     state.lifespanWarned.finalYear = true;
+  }
+  if (state.reincarnation === 0 && remain <= 1) {
+    maybeFirstLifeStash();
   }
   if (state.reincarnation > 0 && !state.lifespanWarned.tenYear && remain <= 10) {
     addMajor('不知为何，你清晰感知到自己的大限将至，大约还有十年。');
@@ -1067,6 +1243,10 @@ function loadState() {
       state.artifacts = state.artifacts.map(withArtifactMeta).slice(0, MAX_ARTIFACTS);
       if (typeof state.lifeDays !== 'number') state.lifeDays = state.totalDays;
       if (!Array.isArray(state.stashes)) state.stashes = [];
+      if (typeof state.lastStashDay !== 'number') state.lastStashDay = 0;
+      if (typeof state.lastTheftRollLife !== 'number') state.lastTheftRollLife = 0;
+      if (typeof state.lastStashReminderLife !== 'number') state.lastStashReminderLife = 0;
+      if (typeof state.firstLifeStashSettled !== 'boolean') state.firstLifeStashSettled = false;
       ensureLifespan();
       if (!state.prevActivity) state.prevActivity = '修行';
       if (!state.battle) state.battle = null;
@@ -1092,6 +1272,9 @@ function loadState() {
         }
       }
       updatePlanMode();
+      rollStashTheft();
+      remindStashMemory();
+      maybeOpenStashes();
     } catch (err) {
       console.warn('Failed to load save', err);
     }
@@ -1458,6 +1641,7 @@ function levelUp() {
   }
   state.mood = Math.min(state.mood + 10, 100);
   addMajor(`突破至${formatLevel(state.level)}`);
+  maybeOpenStashes();
 }
 
 function handleCultivation(action) {
@@ -1904,6 +2088,10 @@ function handleDeath(reason) {
     reincarnation: state.reincarnation,
     artifacts: [],
     stashes: keepStashes,
+    lastStashDay: 0,
+    lastTheftRollLife: state.lastTheftRollLife,
+    lastStashReminderLife: state.lastStashReminderLife,
+    firstLifeStashSettled: state.firstLifeStashSettled,
     bestLevelThisLife: 1,
     lastLifePeak: lastLifePeak,
     lifespanBase: newBase,
@@ -1922,6 +2110,7 @@ function handleDeath(reason) {
   addMajor(`转生轮回，第${lifeNo}世。${sect}弟子将于八岁觉醒记忆。`);
   state.totalDays = finalDay;
   state.lifeDays = ageDays;
+  remindStashMemory();
   updatePlanMode();
 }
 
@@ -2022,6 +2211,7 @@ function tickDay() {
   }
   handleMoodCollapse();
 
+  maybeAccumulateStash();
   checkLifespanWarnings();
 
   clampXp();
@@ -2099,6 +2289,10 @@ function resetAll() {
     reincarnation: 0,
     artifacts: [],
     stashes: [],
+    lastStashDay: 0,
+    lastTheftRollLife: 0,
+    lastStashReminderLife: 0,
+    firstLifeStashSettled: false,
     bestLevelThisLife: 1,
     lastLifePeak: 0,
     lifespanBase: rollBaseLifespan(),
@@ -2210,6 +2404,26 @@ function setupEvents() {
       return;
     }
     handleFortuity(true);
+  });
+
+  ui.stashTest.addEventListener('click', () => {
+    if (!testMode) {
+      alert('请在控制台输入 testmode("password") 开启测试模式');
+      return;
+    }
+    const ok = createStash('测试藏宝：手动埋下资源。', {
+      portionRange: [0.3, 0.5],
+      includeArtifactChance: 0.5,
+      force: false,
+    });
+    if (!ok) {
+      pushTestInfo('无可藏宝物。');
+      addMajor('翻遍行囊，发现无可藏宝之物。');
+    } else {
+      pushTestInfo('手动触发藏宝，等待下一世开启。');
+      saveState();
+      updateUI();
+    }
   });
 
   ui.tabButtons.forEach((btn) => {

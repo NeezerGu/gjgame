@@ -21,4 +21,6 @@
 2. 直接启动桌面版：`npm start`
 3. 打包为 Windows 可执行文件：`npm run electron:package`（产物在 `dist/` 目录下）
 
+> 已固定 Electron 版本至 `^39.2.6` 以规避 GHSA-vmqv-hx8q-j7mg，打包工具采用官方维护的 `@electron/packager`。
+
 > Electron 脚本会直接加载仓库内的 `index.html`，无需额外服务端。

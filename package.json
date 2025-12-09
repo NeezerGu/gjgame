@@ -9,7 +9,7 @@
     "electron:package": "electron-packager . gjgame --platform=win32 --arch=x64 --out=dist --overwrite"
   },
   "devDependencies": {
-    "electron": "^28.3.3",
-    "electron-packager": "^17.1.2"
+    "@electron/packager": "^17.1.2",
+    "electron": "^39.2.6"
   }
 }

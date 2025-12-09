@@ -5,12 +5,13 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
+    autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
+      nodeIntegration: false,
     },
   });
 
-  win.setMenuBarVisibility(false);
   win.loadFile(path.join(__dirname, 'index.html'));
 }
 

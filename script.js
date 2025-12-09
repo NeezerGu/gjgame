@@ -103,15 +103,15 @@ const LONGEVITY_ELIXIRS = {
 };
 
 const CULTIVATE_ELIXIR = {
-  练气: { add_exp: 3650, price_ls: 4015 },
-  筑基: { add_exp: 10950, price_ls: 10220 },
-  结丹: { add_exp: 18250, price_ls: 25550 },
-  元婴: { add_exp: 29200, price_ls: 62050 },
-  化神: { add_exp: 43800, price_ls: 135050 },
-  炼虚: { add_exp: 58400, price_ls: 273750 },
-  合体: { add_exp: 73000, price_ls: 511000 },
-  大乘: { add_exp: 83950, price_ls: 876000 },
-  渡劫: { add_exp: 94900, price_ls: 1460000 },
+  练气: { add_exp: 36500, price_ls: 4000 },
+  筑基: { add_exp: 109500, price_ls: 10000 },
+  结丹: { add_exp: 182500, price_ls: 25000 },
+  元婴: { add_exp: 292000, price_ls: 60000 },
+  化神: { add_exp: 438000, price_ls: 130000 },
+  炼虚: { add_exp: 584000, price_ls: 270000 },
+  合体: { add_exp: 730000, price_ls: 500000 },
+  大乘: { add_exp: 839500, price_ls: 870000 },
+  渡劫: { add_exp: 949000, price_ls: 1500000 },
 };
 
 const LEVEL_NEED_EXP = {
@@ -879,8 +879,10 @@ function pendingStashes() {
 }
 
 function stashStoneSum() {
+  const life = currentLife();
   return (state.stashes || []).reduce((sum, s) => {
     if (s.opened || s.stolen) return sum;
+    if (s.createdLife >= life) return sum;
     return sum + (s.stones || 0);
   }, 0);
 }

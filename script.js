@@ -188,7 +188,7 @@ const state = {
   finalLegacyPrepared: false,
   planReason: '初始设定：以突破为先。',
   planExpectationLevel: null,
-  planLockedLife: null,
+  planLockedLevel: null,
 };
 
 ensureLifespan();
@@ -986,8 +986,15 @@ function maybeTriggerBreakthrough() {
 function maybeDiscoverPillMerchant() {
   const { realm, stage } = levelToRealmStage(state.level);
   if (state.pillMerchantKnown) return;
-  if (currentLife() < 2) return;
   if (!(realm === '练气' && stage >= 5)) return;
+  const life = currentLife();
+  if (life < 2) return;
+
+  // 第二世起开始主动寻找延寿方案
+  if (life === 2) {
+    addMajor('突破至练气五层后，你开始认真盘算寿元长短，暗自寻找延寿之法。');
+  }
+
   state.pillMerchantKnown = true;
   addMajor('于坊市偶遇丹药商，得知有延寿丹、修炼丹可换取。');
 }
@@ -1190,18 +1197,197 @@ function maybePrepareFinalStash(force = false) {
   }
 }
 
-function estimateAffordableLevel(totalStones) {
-  let level = state.level;
-  let stones = totalStones;
-  while (level < TOTAL_PRE_LEVELS + 1) {
-    const cost = stonesRequired(level);
-    if (!cost || stones < cost) break;
-    stones -= cost;
-    level += 1;
+function estimateTimeRatios() {
+  // 粗略估算本世中用于「修炼」和「打工」的大致时间占比。
+  let cultivate = 0.5;
+  let work = 0.3;
+
+  const mood = typeof state.mood === 'number' ? state.mood : 70;
+
+  // 心境很好时，更容易长时间稳定修炼；心境差时，两边效率都会受影响。
+  if (mood >= 90) {
+    cultivate += 0.1;
+  } else if (mood >= 80) {
+    cultivate += 0.05;
+  } else if (mood < 40) {
+    cultivate -= 0.1;
+    work -= 0.05;
+  } else if (mood < 25) {
+    cultivate -= 0.15;
+    work -= 0.1;
   }
-  return level;
+
+  // 策略模式：冲境界 -> 多修行；打工攒积累 -> 多打工。
+  if (state.planMode === '冲境界') {
+    cultivate += 0.15;
+    work -= 0.05;
+  } else if (state.planMode === '打工攒积累') {
+    work += 0.2;
+    cultivate -= 0.05;
+  }
+
+  // 重伤/濒死时，两边都打折。
+  if (state.condition === '重伤' || state.condition === '濒死') {
+    cultivate -= 0.1;
+    work -= 0.15;
+  }
+
+  cultivate = Math.max(0.1, cultivate);
+  work = Math.max(0.05, work);
+
+  // 预留一部分时间给调心、战斗等其他事务。
+  let total = cultivate + work;
+  if (total > 0.95) {
+    const scale = 0.95 / total;
+    cultivate *= scale;
+    work *= scale;
+  }
+
+  return { cultivateRatio: cultivate, workRatio: work };
 }
 
+function expectedDailyXpForLevel(level, cultivateRatio) {
+  const info = levelToRealmStage(level);
+  const realm = info.realm;
+  const base = REALM_CULTIVATE_GAIN[realm] || REALM_CULTIVATE_GAIN['练气'];
+
+  // 与 gainPerSecond 相同的悟性/重复修炼期望值。
+  const repeats = levelRepeatCount(level);
+  const capped = Math.min(20, repeats);
+  const highProb = 0.2 + (0.3 * capped) / 20; // up to 50%
+  const minFactor = 0.8 + (0.2 * capped) / 20; // up to 1.0
+  const avgLow = (minFactor + 1.2) / 2;
+  const expectedRandomFactor = highProb * 1.2 + (1 - highProb) * avgLow;
+
+  // 心境加成 + 法器修炼加成，与 baseGain 保持一致。
+  const mood = typeof state.mood === 'number' ? state.mood : 70;
+  const moodBonusRaw = 0.85 + (mood - 60) / 90;
+  const moodBonus = Math.max(1, moodBonusRaw);
+  const artifactBoost = 1 + artifactBonus('xpBoost');
+
+  return base * expectedRandomFactor * moodBonus * artifactBoost * cultivateRatio;
+}
+
+function expectedDailyStonesForRealm(realm, workRatio) {
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  const rewardRange = cfg.reward || [0, 0];
+  const durationRange = cfg.duration || [10, 10];
+  const avgReward = (Number(rewardRange[0]) + Number(rewardRange[1])) / 2 || 0;
+  const avgDuration = (Number(durationRange[0]) + Number(durationRange[1])) / 2 || 1;
+
+  let basePerDay = 0;
+  if (avgReward > 0 && avgDuration > 0) {
+    // 全职打工时的平均每日灵石，再乘以「打工时间占比」。
+    basePerDay = (avgReward / avgDuration) * workRatio;
+  }
+
+  // 心境与状态对打工效率的整体修正。
+  const mood = typeof state.mood === 'number' ? state.mood : 70;
+  let moodFactor = 1;
+  if (mood < 40) moodFactor -= 0.2;
+  if (mood < 25) moodFactor -= 0.1;
+  if (mood >= 80) moodFactor += 0.05;
+  if (mood >= 90) moodFactor += 0.05;
+  if (state.condition === '重伤' || state.condition === '濒死') {
+    moodFactor -= 0.3;
+  }
+  moodFactor = Math.max(0.3, Math.min(1.3, moodFactor));
+  basePerDay *= moodFactor;
+
+  // 法器带来的「额外白捡灵石」期望值。
+  const stoneLuck = artifactBonus('stoneLuck') || 0;
+  const stoneValue = artifactBonus('stoneValue') || 0;
+  const extraFromArtifacts = stoneLuck * (stoneValue || 1);
+
+  return basePerDay + extraFromArtifacts;
+}
+
+function estimateAffordableLevel(totalStones) {
+  // 估算：在本世剩余寿元内，角色可以依靠「自然修炼 + 打工所得灵石 + 修炼丹」
+  // 理性分配资源后，最多能推到的层数。
+  ensureLifespan();
+  const remainYears = Math.max(0, remainingYears());
+  const remainDays = Math.max(0, Math.floor(remainYears * DAYS_PER_YEAR));
+  if (!Number.isFinite(remainDays) || remainDays <= 0) return state.level;
+
+  const { cultivateRatio, workRatio } = estimateTimeRatios();
+
+  // 1）先估算自然修炼可以带来的总修为（不考虑吃丹）。
+  const xpPerDay = expectedDailyXpForLevel(state.level, cultivateRatio);
+  let xpPool = (state.xp || 0) + remainDays * xpPerDay;
+  if (!Number.isFinite(xpPool) || xpPool < 0) xpPool = 0;
+
+  // 2）基于修为池，粗略推一个「仅靠修为、忽略灵石限制」的上限层数，
+  //    用来推断本世大致会在什么境界活动，从而估算打工收益使用哪个境界的档位更合理。
+  let xpOnlyLevel = state.level;
+  let xpSim = xpPool;
+  while (xpOnlyLevel < TOTAL_PRE_LEVELS + 1) {
+    const xpCost = requiredXp(xpOnlyLevel);
+    if (!xpCost || xpSim < xpCost) break;
+    xpSim -= xpCost;
+    xpOnlyLevel += 1;
+  }
+
+  const startInfo = levelToRealmStage(state.level);
+  const endInfo = levelToRealmStage(xpOnlyLevel);
+  const startIndex = realmOrder.indexOf(startInfo.realm);
+  const endIndex = realmOrder.indexOf(endInfo.realm);
+  let workRealmIndex = startIndex >= 0 ? startIndex : 0;
+  if (startIndex >= 0 && endIndex >= startIndex) {
+    workRealmIndex = Math.floor((startIndex + endIndex) / 2);
+  }
+  const workRealm = realmOrder[workRealmIndex] || startInfo.realm || '练气';
+
+  // 3）用「大致工作境界」 + 打工时间占比，预估本世还能通过打工赚多少灵石。
+  const stonesPerDay = expectedDailyStonesForRealm(workRealm, workRatio);
+  let futureWorkStones = Math.max(0, stonesPerDay * remainDays);
+  if (!Number.isFinite(futureWorkStones)) futureWorkStones = 0;
+
+  // 总可用灵石 = 当前可动用灵石（函数参数） + 未来打工预估。
+  let stones = Math.max(0, Number(totalStones) || 0) + futureWorkStones;
+
+  // 4）在总修为池 + 总灵石池的前提下，按层逐步推演突破，必要时用修炼丹补修为。
+  const usesMap = Object.assign({}, state.cultivateElixirUses || {});
+  let level = state.level;
+
+  let steps = 0;
+  while (level < TOTAL_PRE_LEVELS + 1 && steps < 2000) {
+    steps += 1;
+    const xpCost = requiredXp(level);
+    const stoneCost = stonesRequired(level);
+    if (!stoneCost || stones < stoneCost) break;
+
+    // 若当前修为不足，则尝试使用本境界修炼丹来补足。
+    if (xpCost > 0 && xpPool < xpCost) {
+      const info = levelToRealmStage(level);
+      const curRealm = info.realm;
+      const elixirCfg = CULTIVATE_ELIXIR[curRealm];
+
+      if (!elixirCfg || elixirCfg.price_ls <= 0 || elixirCfg.add_exp <= 0) {
+        break;
+      }
+
+      let pillGuard = 0;
+      while (xpPool < xpCost && stones >= elixirCfg.price_ls && pillGuard < 200) {
+        pillGuard += 1;
+        const used = usesMap[curRealm] || 0;
+        const gain = elixirCfg.add_exp * Math.pow(0.9, used);
+        if (gain <= 1) break;
+        xpPool += gain;
+        stones -= elixirCfg.price_ls;
+        usesMap[curRealm] = used + 1;
+      }
+
+      if (xpPool < xpCost) break;
+    }
+
+    xpPool -= xpCost;
+    stones -= stoneCost;
+    level += 1;
+  }
+
+  return level;
+}
 function accessibleWealth() {
   const { realm, stage } = levelToRealmStage(state.level);
   const stash = realm === '练气' && stage < 5 ? 0 : stashStoneSum();
@@ -1219,7 +1405,7 @@ function updatePlanMode() {
   }
   const { realm, stage } = levelToRealmStage(state.level);
   if (stage < 5) return;
-  if (state.planLockedLife === life) return;
+  if (state.planLockedLevel === state.level) return;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const maxWorkReward = cfg.reward[1];
   const wealth = accessibleWealth();
@@ -1254,7 +1440,7 @@ function updatePlanMode() {
     state.planReason = '正常修行推进境界。';
   }
 
-  state.planLockedLife = life;
+  state.planLockedLevel = state.level;
 }
 
 function shouldAccumulateWork() {
@@ -2421,7 +2607,7 @@ function handleDeath(reason) {
     workStreak: 0,
     cultivateStreak: 0,
     planMode: keepPlan,
-    planLockedLife: null,
+    planLockedLevel: null,
     knownMaxLevel: knownMax,
     condition: '正常',
     healTimer: 0,
@@ -2474,6 +2660,7 @@ function narrateRebirth(sectName, baseDay = 0) {
   const literacyDay = birthDay + 7 * DAYS_PER_YEAR + randRange(-30, 40);
   const awakenDay = birthDay + START_AGE_YEARS * DAYS_PER_YEAR;
   const sectDay = awakenDay + randRange(5, 120);
+  const life = currentLife();
   const timeline = [
     { day: birthDay, text: '出生于凡尘，灵根潜藏' },
     { day: childhoodDay, text: '童年平凡，劳作习武，心性渐成' },
@@ -2485,6 +2672,14 @@ function narrateRebirth(sectName, baseDay = 0) {
   timeline.forEach(({ day, text }) => {
     state.totalDays = day;
     addMajor(text);
+    // 仅在觉醒记忆节点追加自我认知
+    if (day === awakenDay) {
+      if (life === 2) {
+        addMajor('前尘往事如潮水般涌来，你隐约意识到那些并非幻梦，而是自己曾经的真实经历——大概是个重生之人。');
+      } else if (life === 3) {
+        addMajor('数世记忆在心中重叠，你几乎可以肯定：自己死后仍会再度归来，再入轮回。');
+      }
+    }
   });
 
   state.totalDays = sectDay;
@@ -2631,7 +2826,7 @@ function resetAll() {
     workStreak: 0,
     cultivateStreak: 0,
     planMode: '冲境界',
-    planLockedLife: null,
+    planLockedLevel: null,
     knownMaxLevel: 1,
     condition: '正常',
     healTimer: 0,

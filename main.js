@@ -11,6 +11,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       devTools: devToolsEnabled,
+      backgroundThrottling: false, // 关键：关闭后台节流
     },
   });
 

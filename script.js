@@ -1282,6 +1282,12 @@ function bestLongevityOption() {
     if (remain > 20) return null;
 
     let targetWorkRealm = state.planWorkTargetRealm || realm;
+    const curIdx = realmOrder.indexOf(realm);
+    const tgtIdx = realmOrder.indexOf(targetWorkRealm);
+    if (tgtIdx > curIdx) {
+      // 尚未到达目标打工境界：此阶段优先把灵石留给突破/修炼丹，不购买封存用的延寿丹
+      return null;
+    }
     let stonesPerYear = stonesPerYearForRealm(targetWorkRealm);
     if (!Number.isFinite(stonesPerYear) || stonesPerYear <= 0) {
       stonesPerYear = stonesPerYearForRealm(realm);
@@ -1370,7 +1376,11 @@ function bestCultivateOption() {
   const peakIndex = realmOrder.indexOf(peakRealm);
   const curIndex = realmOrder.indexOf(realm);
 
-  if (realm === '练气' && peakIndex - curIndex >= 1) {
+  const targetWorkRealm = state.planWorkTargetRealm || realm;
+  const targetIndex = realmOrder.indexOf(targetWorkRealm);
+  const inWorkUpgrade = mode === '打工攒积累' && targetIndex > curIndex;
+
+  if (realm === '练气' && peakIndex - curIndex >= 1 && !inWorkUpgrade) {
     // 历史已经稳定在更高大境界，这一世练气阶段就不要再浪费修炼丹
     return null;
   }
@@ -1379,7 +1389,7 @@ function bestCultivateOption() {
   if (!Number.isFinite(remainYears) || remainYears <= 0) return null;
 
   // 寿命非常宽裕时，整体不吃修炼丹（慢慢修即可）—— 通用规则
-  if (remainYears > 20) return null;
+  if (remainYears > 20 && !inWorkUpgrade) return null;
 
   // 当前层到下一层的修为缺口
   const xpNeed = Math.max(0, state.xpToNext - state.xp);
@@ -1397,6 +1407,8 @@ function bestCultivateOption() {
   if (!Number.isFinite(timeSavedYears) || timeSavedYears <= 0) return null;
 
   if (mode === '打工攒积累') {
+    if (!inWorkUpgrade) return null;
+
     // === 打工模式：用 ROI 判定 ===
     let targetWorkRealm = state.planWorkTargetRealm || realm;
     let stonesPerYear = stonesPerYearForRealm(targetWorkRealm);
@@ -1510,8 +1522,21 @@ function maybeHandleElixirs() {
     pushTestInfo(`丹药购买：${chosen.name}（策略：${state.planMode}）`);
   }
 }
+
+function shouldDeferStashUntilWorkRealm() {
+  if (state.planMode !== '打工攒积累') return false;
+  const targetRealm = state.planWorkTargetRealm;
+  if (!targetRealm) return false;
+  const curRealm = levelToRealmStage(state.level).realm;
+  const curIdx = realmOrder.indexOf(curRealm);
+  const tgtIdx = realmOrder.indexOf(targetRealm);
+  if (curIdx < 0 || tgtIdx < 0) return false;
+  return tgtIdx > curIdx;
+}
+
 function maybeFirstLifeStash() {
   if (state.reincarnation !== 0 || state.firstLifeStashSettled) return;
+  if (shouldDeferStashUntilWorkRealm()) return;
   const chance = Math.random();
   if (chance > 0.05) {
     state.firstLifeStashSettled = true;
@@ -1534,6 +1559,7 @@ function maybeFirstLifeStash() {
 
 function maybeAccumulateStash() {
   if (state.planMode !== '打工攒积累') return;
+  if (shouldDeferStashUntilWorkRealm()) return;
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const target = cfg.reward[1] * DAYS_PER_YEAR;
@@ -1842,16 +1868,26 @@ const predictedInfo = levelToRealmStage(state.planExpectationLevel || state.leve
     state.planWorkSummary = bestPlan;
 
     const approxGain =
-      Number.isFinite(bestPlan.totalStones) && bestPlan.totalStones > 0
-        ? `约${Math.round(bestPlan.totalStones)}灵石`
-        : '较高灵石收益';
+      Number.isFinite(bestPlan.netStones) && bestPlan.netStones > 0
+        ? `约${Math.round(bestPlan.netStones)}灵石（净）`
+        : Number.isFinite(bestPlan.totalStones) && bestPlan.totalStones > 0
+          ? `约${Math.round(bestPlan.totalStones)}灵石（毛）`
+          : '较高灵石收益';
+
+    const candidateRealms = peakIndex >= 0 ? realmOrder.slice(0, peakIndex + 1) : realmOrder.slice();
+    const comparedRealms = [];
+    for (const r of candidateRealms) {
+      const p = evaluateWorkPlanForRealm(r);
+      if (p) comparedRealms.push(r);
+    }
+    const compareText = comparedRealms.length ? `对比「${comparedRealms.join('」「')}」等方案后` : '推演多种方案后';
 
     if (bestPlan.realm === peakRealm) {
-      state.planReason = `本世难以迈入${nextRealm || '更高境界'}，推演多种打工方案后，在「${
+      state.planReason = `本世难以迈入${nextRealm || '更高境界'}，${compareText}，在「${
         bestPlan.realm
       }」境界先行突破再专注打工终世收益最高（${approxGain}）。`;
     } else {
-      state.planReason = `本世难以迈入${nextRealm || '更高境界'}，对比「练气」「筑基」等多种方案后，在「${
+      state.planReason = `本世难以迈入${nextRealm || '更高境界'}，${compareText}，在「${
         bestPlan.realm
       }」境界专注打工终世收益最高（${approxGain}）。`;
     }

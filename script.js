@@ -103,16 +103,20 @@ const LONGEVITY_ELIXIRS = {
 };
 
 const CULTIVATE_ELIXIR = {
-  练气: { add_exp: 3650, price_ls: 4015 },
-  筑基: { add_exp: 10950, price_ls: 10220 },
-  结丹: { add_exp: 18250, price_ls: 25550 },
-  元婴: { add_exp: 29200, price_ls: 62050 },
-  化神: { add_exp: 43800, price_ls: 135050 },
-  炼虚: { add_exp: 58400, price_ls: 273750 },
-  合体: { add_exp: 73000, price_ls: 511000 },
-  大乘: { add_exp: 83950, price_ls: 876000 },
-  渡劫: { add_exp: 94900, price_ls: 1460000 },
+  // 修炼丹：
+  // - add_exp：同境界「纯修炼」10年的修为点（不含战斗/奇遇/藏宝等）
+  // - price_ls：同境界「仅打工结算」20年的净灵石（含调心影响进度），按 100 位四舍五入取整
+  练气: { add_exp: 32474, price_ls: 3000 },
+  筑基: { add_exp: 64948, price_ls: 6800 },
+  结丹: { add_exp: 129895, price_ls: 15700 },
+  元婴: { add_exp: 227316, price_ls: 33800 },
+  化神: { add_exp: 357211, price_ls: 66200 },
+  炼虚: { add_exp: 487106, price_ls: 122200 },
+  合体: { add_exp: 617001, price_ls: 209700 },
+  大乘: { add_exp: 746896, price_ls: 323300 },
+  渡劫: { add_exp: 860554, price_ls: 491000 },
 };
+
 
 const LEVEL_NEED_EXP = {
   练气: [1898, 5694, 9490, 13286, 17082, 20878, 24674, 28470, 32266, 36062],
@@ -139,6 +143,7 @@ let windowId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 let allowRun = true;
 let latestLogEntry = null;
 let timeScale = 1;
+let lastTickRealTime = Date.now();
 
 const state = {
   level: 1,
@@ -188,7 +193,15 @@ const state = {
   finalLegacyPrepared: false,
   planReason: '初始设定：以突破为先。',
   planExpectationLevel: null,
+  planExpectationMeta: null,
+  planDiag: '',
+  workPlanDiag: '',
+  planLockedLife: null,
 };
+
+
+// === Simulation (for strategy evaluation) ===
+let SIMULATION_MODE = false;
 
 ensureLifespan();
 
@@ -570,6 +583,501 @@ const WORK_CONFIG = Object.fromEntries(
   Object.keys(WORK_TASKS).map((realm) => [realm, { duration: WORK_DURATION[realm], reward: WORK_REWARD[realm], tasks: WORK_TASKS[realm] }])
 );
 
+// === 轻智能·打工收益与境界规划辅助函数 ===
+
+// 根据大境界计算其起始层级（从1开始）
+function realmStartLevel(realm) {
+  let level = 1;
+  for (const r of realmOrder) {
+    const maxStage = r === '飞升' ? 1 : 10;
+    if (r === realm) return level;
+    level += maxStage;
+  }
+  return level;
+}
+
+// 估算某大境界下，一年打工大致可获得的灵石（仅用于策略比较）
+function stonesPerYearForRealm(realm) {
+  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
+  if (!cfg || !cfg.duration || !cfg.reward) return 0;
+
+  // duration 配置本身就是「一次打工需要的天数」区间
+  const avgDurationDays = (cfg.duration[0] + cfg.duration[1]) / 2;
+  const avgReward = (cfg.reward[0] + cfg.reward[1]) / 2; // 每次打工的灵石收益（一次任务）
+
+  if (avgDurationDays <= 0 || avgReward <= 0) return 0;
+
+  // ① 并非一年 365 天都在打工：修行 / 调心 / 事件 会占去不少时间
+  //    这里用略保守的「有效打工天数比例」
+  const EFFECTIVE_WORK_DAY_RATIO = 0.35; // 从 0.4 降到 0.35，更接近实际模拟表现
+  const effectiveWorkDays = DAYS_PER_YEAR * EFFECTIVE_WORK_DAY_RATIO;
+
+  // ② 打工过程中，心境爆炸、疗伤、奇遇等会进一步影响效率
+  //    在收益端再乘以一个效率折扣系数
+  const INTERRUPTION_EFFICIENCY = 0.85;
+
+  const jobsPerYear = effectiveWorkDays / avgDurationDays;
+  return avgReward * jobsPerYear * INTERRUPTION_EFFICIENCY;
+}
+
+// 评估：若以 targetRealm 为最终打工境界，本世大约能净赚多少灵石
+function stashStoneSumAllOf(stashes) {
+  let sum = 0;
+  const arr = Array.isArray(stashes) ? stashes : [];
+  for (const s of arr) {
+    if (!s) continue;
+    if (s.opened) continue;
+    if (s.stolen) continue;
+    const v = Number(s.stones);
+    if (Number.isFinite(v) && v > 0) sum += v;
+  }
+  return sum;
+}
+
+function stashStoneSumAll() {
+  return stashStoneSumAllOf(state.stashes);
+}
+
+function carryWealthStonesOf(st) {
+  const stones = Number(st?.spiritStones || 0);
+  const sum = stashStoneSumAllOf(st?.stashes);
+  return (Number.isFinite(stones) ? stones : 0) + (Number.isFinite(sum) ? sum : 0);
+}
+
+function carryWealthStones() {
+  return carryWealthStonesOf(state);
+}
+
+// === 可继承财富口径扩展：封存丹药按购入价折算（用于诊断/规划，不改变实际玩法） ===
+function elixirPurchasePrice(pill) {
+  if (!pill) return 0;
+  if (pill.kind === 'cultivate') {
+    const cfg = CULTIVATE_ELIXIR[pill.realm];
+    const v = cfg ? Number(cfg.price_ls) : 0;
+    return Number.isFinite(v) ? v : 0;
+  }
+  if (pill.kind === 'longevity') {
+    const cfg = LONGEVITY_ELIXIRS[pill.size];
+    const v = cfg ? Number(cfg.price) : 0;
+    return Number.isFinite(v) ? v : 0;
+  }
+  return 0;
+}
+
+function elixirValueSumAllOf(elixirs) {
+  let sum = 0;
+  const arr = Array.isArray(elixirs) ? elixirs : [];
+  for (const e of arr) {
+    const v = elixirPurchasePrice(e);
+    if (Number.isFinite(v) && v > 0) sum += v;
+  }
+  return sum;
+}
+
+function stashElixirValueSumAllOf(stashes) {
+  let sum = 0;
+  const arr = Array.isArray(stashes) ? stashes : [];
+  for (const s of arr) {
+    if (!s) continue;
+    if (s.opened) continue;
+    if (s.stolen) continue;
+    if (!Array.isArray(s.elixirs) || !s.elixirs.length) continue;
+    sum += elixirValueSumAllOf(s.elixirs);
+  }
+  return sum;
+}
+
+function carryWealthBreakdownOf(st) {
+  const cash = carryWealthStonesOf(st);
+  const stashedElixir = stashElixirValueSumAllOf(st?.stashes);
+  const onBodyElixir = elixirValueSumAllOf(st?.pills);
+  const elixir = stashedElixir + onBodyElixir;
+  // 规划/诊断的“折算口径”仅计入【封存】丹药（藏宝未取出时的可继承资产），随身丹药单独展示。
+  const total = cash + stashedElixir;
+  return { cash, stashedElixir, onBodyElixir, elixir, total };
+}
+
+function carryWealthStonesWithElixirValueOf(st) {
+  return carryWealthBreakdownOf(st).total;
+}
+
+function carryWealthStonesWithElixirValue() {
+  return carryWealthStonesWithElixirValueOf(state);
+}
+// === 可继承财富口径扩展 结束 ===
+
+
+function cloneStateDeep(obj) {
+  if (typeof structuredClone === 'function') return structuredClone(obj);
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function replaceStateInPlace(dst, src) {
+  // Keep dst reference stable; overwrite fields to match src.
+  for (const k of Object.keys(dst)) {
+    if (!(k in src)) delete dst[k];
+  }
+  for (const k of Object.keys(src)) {
+    dst[k] = src[k];
+  }
+}
+
+function mulberry32(seed) {
+  let a = (seed >>> 0) || 1;
+  return function () {
+    a |= 0;
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function makeWorkPlanSimSeed(targetRealm) {
+  const life = (state.reincarnation || 0) + 1;
+  let h = 2166136261;
+  const mix = (x) => {
+    h ^= x >>> 0;
+    h = Math.imul(h, 16777619);
+    h >>>= 0;
+  };
+  mix(life);
+  mix(state.level || 0);
+  mix(Math.floor(state.xp || 0));
+  mix(Math.floor((state.spiritStones || 0) * 97));
+  mix(Math.floor(stashStoneSumAll() * 13));
+  const s = String(targetRealm || '');
+  for (let i = 0; i < s.length; i += 1) mix(s.charCodeAt(i));
+  // Artifacts can affect work/cultivation/battle; include in seed to keep stable & fair.
+  const arts = Array.isArray(state.artifacts) ? state.artifacts : [];
+  for (const a of arts) {
+    const k = String(a?.key || '');
+    for (let i = 0; i < k.length; i += 1) mix(k.charCodeAt(i));
+  }
+  return h >>> 0;
+}
+
+const WORK_PLAN_SIM_CACHE = new Map();
+
+const BREAKTHROUGH_CAP_SIM_CACHE = new Map();
+
+function makePlanSimSeed(tag) {
+  // Deterministic seed per decision moment + tag (so changes in rules automatically flow through).
+  const life = (state.reincarnation || 0) + 1;
+  let h = 2166136261;
+  const mix = (v) => {
+    h ^= v >>> 0;
+    // FNV-1a prime multiplication (via shifts) keeps it fast & stable.
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  };
+
+  mix(life);
+  mix(Math.floor(state.totalDays || 0));
+  mix(Math.floor(state.lifeDays || 0));
+  mix(Math.floor(state.level || 0));
+  mix(Math.floor(state.xp || 0));
+  mix(Math.floor((state.spiritStones || 0) * 97));
+  mix(Math.floor((stashStoneSumAll() || 0) * 13));
+  mix(Math.floor((state.caution || 0) * 1000));
+  mix((state.happiness || 0) ? 1 : 0);
+
+  const s = String(tag || '');
+  for (let i = 0; i < s.length; i += 1) mix(s.charCodeAt(i));
+
+  // Artifacts can affect rates; include a stable hash of keys.
+  const arts = Array.isArray(state.artifacts) ? state.artifacts : [];
+  for (const a of arts) {
+    const k = String(a?.key || '');
+    for (let i = 0; i < k.length; i += 1) mix(k.charCodeAt(i));
+  }
+  return h >>> 0;
+}
+
+function capSimKey(tag) {
+  return `${workPlanSimBaseKey()}|cap|${String(tag || '')}`;
+}
+
+function evaluateBreakthroughCap() {
+  const key = capSimKey('breakthrough');
+  const cached = BREAKTHROUGH_CAP_SIM_CACHE.get(key);
+  if (cached) return cached;
+
+  const result = simulateBreakthroughCap({ seed: makePlanSimSeed('breakthrough-cap') });
+  if (result) {
+    BREAKTHROUGH_CAP_SIM_CACHE.set(key, result);
+    // Bound cache size.
+    if (BREAKTHROUGH_CAP_SIM_CACHE.size > 80) {
+      const first = BREAKTHROUGH_CAP_SIM_CACHE.keys().next().value;
+      BREAKTHROUGH_CAP_SIM_CACHE.delete(first);
+    }
+  }
+  return result;
+}
+
+function simulateBreakthroughCap({ seed } = {}) {
+  const backup = cloneStateDeep(state);
+  const realRandom = Math.random;
+  SIMULATION_MODE = true;
+
+  const simSeed = Number.isFinite(seed) ? seed >>> 0 : makePlanSimSeed('breakthrough-cap');
+  Math.random = mulberry32(simSeed);
+
+  try {
+    // Rebuild a clean sim state (avoid sharing references).
+    const sim = cloneStateDeep(backup);
+    sim.planMode = '冲境界';
+    sim.planWorkTargetRealm = '';
+    sim.planWorkSummary = null;
+    sim.planLockedLife = null;
+  
+    // Ensure "known max" in sim is aligned, otherwise plan heuristics can be skewed.
+    if (!sim.knownMaxLevel || sim.knownMaxLevel < sim.level) sim.knownMaxLevel = sim.level;
+  
+    // Swap in.
+    replaceStateInPlace(state, sim);
+
+    const startWealth = carryWealthBreakdownOf(state);
+    const startCarry = startWealth.cash;
+    const startCarryValued = startWealth.total;
+  
+    let maxLevelSeen = state.level || 1;
+    const maxYears = 8000; // safety cap; should never hit in normal rules
+    const maxDays = maxYears * DAYS_PER_YEAR;
+  
+    let stopReason = '';
+    for (let i = 0; i < maxDays; i += 1) {
+      if (!Number.isFinite(state.lifeDays) || state.lifeDays < 0) {
+        stopReason = '寿元异常';
+        break;
+      }
+      if (state.condition === '死亡') {
+        stopReason = '寿尽';
+        break;
+      }
+      tickDay();
+      if (state.level > maxLevelSeen) maxLevelSeen = state.level;
+  
+      const info = levelToRealmStage(state.level);
+      if (info.realm === '仙') {
+        stopReason = '成仙';
+        break;
+      }
+    }
+    if (!stopReason) {
+      const lifeDays = Number(state.lifeDays);
+      if (!Number.isFinite(lifeDays) || lifeDays < 0) {
+        stopReason = '上限保护-寿元异常';
+      } else if (lifeDays > maxDays) {
+        stopReason = '上限保护-寿元超阈值';
+      } else {
+        stopReason = '上限保护-未寿尽';
+      }
+    }
+    const endWealth = carryWealthBreakdownOf(state);
+    const endCarry = endWealth.cash;
+    const endCarryValued = endWealth.total;
+    const lifeYears = (state.lifeDays || 0) / DAYS_PER_YEAR;
+  
+    return {
+      maxLevel: maxLevelSeen,
+      lifeYears,
+      startCarry,
+      endCarry,
+      netCarry: endCarry - startCarry,
+      startCarryValued,
+      endCarryValued,
+      netCarryValued: endCarryValued - startCarryValued,
+      endStashedElixirValue: endWealth.stashedElixir,
+      endOnBodyElixirValue: endWealth.onBodyElixir,
+      endCondition: state.condition,
+      endLifeDays: Math.floor(state.lifeDays || 0),
+      endTotalDays: Math.floor(state.totalDays || 0),
+      endRealm: levelToRealmStage(state.level).realm,
+      endLevel: state.level,
+      simSeed,
+      stopReason,
+    };
+  } finally {
+    replaceStateInPlace(state, backup);
+    Math.random = realRandom;
+    SIMULATION_MODE = false;
+  }
+}
+
+function workPlanSimBaseKey() {
+  // A lightweight stamp for caching within the same decision moment.
+  const life = (state.reincarnation || 0) + 1;
+  const stones = Math.floor(state.spiritStones || 0);
+  const stashSum = Math.floor(stashStoneSumAll() || 0);
+  const arts = Array.isArray(state.artifacts) ? state.artifacts : [];
+  const artKey = arts.map((a) => a?.key || '').join(',');
+  const pending = typeof pendingStashes === 'function' ? pendingStashes().length : 0;
+  return [
+    life,
+    state.totalDays || 0,
+    state.lifeDays || 0,
+    state.level || 0,
+    Math.floor(state.xp || 0),
+    stones,
+    Math.floor(state.mood || 0),
+    Math.floor(state.lifespanYears || 0),
+    Math.floor(state.knownMaxLevel || 0),
+    pending,
+    Array.isArray(state.stashes) ? state.stashes.length : 0,
+    stashSum,
+    artKey,
+  ].join('|');
+}
+
+function simulateWorkPlanNet(targetRealm, { seed = null } = {}) {
+  if (SIMULATION_MODE) return null;
+
+  const backup = cloneStateDeep(state);
+  const startWealthBreakdown = carryWealthBreakdownOf(backup);
+  const startWealth = startWealthBreakdown.cash;
+  const startWealthValued = startWealthBreakdown.total;
+
+  const startReinc = backup.reincarnation || 0;
+
+  // Max days: allow very long lives (延寿丹可能把寿命拉很长)，但仍要避免浏览器卡死
+  const baseMaxYears = Math.max(200, Math.ceil((backup.lifespanYears || 0) + 1200));
+  const maxYears = Math.min(8000, baseMaxYears + 3000);
+  const maxDays = maxYears * DAYS_PER_YEAR;
+
+  const originalRandom = Math.random;
+  const simSeed = seed == null ? makeWorkPlanSimSeed(targetRealm) : seed >>> 0;
+
+  SIMULATION_MODE = true;
+  try {
+    Math.random = mulberry32(simSeed);
+
+    const sim = cloneStateDeep(backup);
+    sim.planMode = '打工攒积累';
+    sim.planWorkTargetRealm = targetRealm;
+    sim.planWorkSummary = null;
+
+    replaceStateInPlace(state, sim);
+
+    let steps = 0;
+    let lastLifeDaysBeforeTick = state.lifeDays || 0;
+
+    while (steps < maxDays) {
+      if (state.condition === '死亡') break;
+      if (!Number.isFinite(state.totalDays) || state.totalDays <= 0) break;
+      lastLifeDaysBeforeTick = state.lifeDays || 0;
+      tickDay();
+      steps += 1;
+    }
+
+    const reachedDeath = state.condition === '死亡';
+    const lifeDaysAtDeath = Math.max(1, state.lifeDays || 1);
+    const lifeYears = lifeDaysAtDeath / DAYS_PER_YEAR;
+
+    const endWealthBreakdown = carryWealthBreakdownOf(state);
+    const endWealth = endWealthBreakdown.cash;
+    const endWealthValued = endWealthBreakdown.total;
+    const net = endWealth - startWealth;
+    const netValued = endWealthValued - startWealthValued;
+
+    return {
+      realm: targetRealm,
+      netStones: net,
+      netStonesValued: netValued,
+      totalStones: endWealth, // 仅灵石口径：生命周期结束时可继承财富总量
+      totalStonesValued: endWealthValued,
+      endStashedElixirValue: endWealthBreakdown.stashedElixir,
+      endOnBodyElixirValue: endWealthBreakdown.onBodyElixir,
+      lifeYears,
+      avgNetPerYear: lifeYears > 0 ? net / lifeYears : 0,
+      reachedDeath,
+      simSeed,
+    };
+  } catch (e) {
+    // 仿真异常：不让策略判定崩溃
+    return null;
+  } finally {
+    Math.random = originalRandom;
+    SIMULATION_MODE = false;
+    replaceStateInPlace(state, backup);
+  }
+}
+
+function evaluateWorkPlanForRealm(targetRealm) {
+  if (SIMULATION_MODE) return null;
+
+  // Avoid unbounded growth across runs.
+  if (WORK_PLAN_SIM_CACHE.size > 240) WORK_PLAN_SIM_CACHE.clear();
+
+  const baseKey = workPlanSimBaseKey();
+  const cacheKey = `${baseKey}|${String(targetRealm)}`;
+  if (WORK_PLAN_SIM_CACHE.has(cacheKey)) return WORK_PLAN_SIM_CACHE.get(cacheKey);
+
+  const plan = simulateWorkPlanNet(targetRealm);
+  if (plan) WORK_PLAN_SIM_CACHE.set(cacheKey, plan);
+  return plan;
+}
+
+// 从「练气」到「已知最高境界」中，选出净收益最高的打工大境界
+function evaluateBestWorkPlan() {
+  const peakLevel = state.knownMaxLevel || state.level;
+  const peakInfo = levelToRealmStage(peakLevel);
+  const peakRealm = peakInfo.realm;
+  const peakIndex = realmOrder.indexOf(peakRealm);
+
+  if (peakIndex < 0) {
+    state.workPlanDiag = '打工候选为空：未知境界。';
+    return null;
+  }
+
+  const candidateRealms = realmOrder.slice(0, peakIndex + 1);
+
+  let best = null;
+  const okPlans = [];
+  const failed = [];
+
+  for (const r of candidateRealms) {
+    const plan = evaluateWorkPlanForRealm(r);
+    if (!plan) {
+      failed.push(r);
+      continue;
+    }
+    okPlans.push(plan);
+    if (!best || plan.netStones > best.netStones) {
+      best = plan;
+    }
+  }
+
+  const okCount = okPlans.length;
+  const failCount = failed.length;
+
+  if (!best) {
+    state.workPlanDiag = `打工候选${candidateRealms.length}个，成功0，失败${failCount}（${failed.join('、')}）。`;
+    return null;
+  }
+
+  // 诊断文本（用于 UI 展示与排错）
+  const sorted = okPlans.slice().sort((a, b) => (b.netStones || 0) - (a.netStones || 0));
+  const top = sorted.slice(0, 3)
+    .map((p) => {
+      const cash = Math.round(p.netStones || 0);
+      const valued = Math.round(p.netStonesValued || 0);
+      return `${p.realm}:现金${cash} / 折算${valued}`;
+    })
+    .join('，');
+  state.workPlanDiag = `打工候选${candidateRealms.length}个，成功${okCount}，失败${failCount}${
+    failCount ? `（${failed.join('、')}）` : ''
+  }；top=${top}。`;
+
+  state.planWorkTargetRealm = best.realm;
+  state.planWorkSummary = best;
+  return best;
+}
+
+
+// === 轻智能·打工收益与境界规划辅助函数 结束 ===
+
+
+
 const artifactIcons = {
   'breeze-scroll': '📜',
   'moon-silk': '🌙',
@@ -878,8 +1386,10 @@ function pendingStashes() {
 }
 
 function stashStoneSum() {
+  const life = currentLife();
   return (state.stashes || []).reduce((sum, s) => {
     if (s.opened || s.stolen) return sum;
+    if (s.createdLife >= life) return sum;
     return sum + (s.stones || 0);
   }, 0);
 }
@@ -983,8 +1493,15 @@ function maybeTriggerBreakthrough() {
 function maybeDiscoverPillMerchant() {
   const { realm, stage } = levelToRealmStage(state.level);
   if (state.pillMerchantKnown) return;
-  if (currentLife() < 2) return;
   if (!(realm === '练气' && stage >= 5)) return;
+  const life = currentLife();
+  if (life < 2) return;
+
+  // 第二世起开始主动寻找延寿方案
+  if (life === 2) {
+    addMajor('突破至练气五层后，你开始认真盘算寿元长短，暗自寻找延寿之法。');
+  }
+
   state.pillMerchantKnown = true;
   addMajor('于坊市偶遇丹药商，得知有延寿丹、修炼丹可换取。');
 }
@@ -1015,21 +1532,45 @@ function consumeLongevityPill(tier, source = '服用') {
   return true;
 }
 
+function applyCultivateElixirBreakthrough() {
+  // 规则：
+  // 1) 丹药触发的突破不消耗灵石
+  // 2) 同一大境界内可连破多层
+  // 3) 若跨大境界，则本次丹药最多推进到「下一大境界的 1 层」，停止继续连破
+  let loops = 0;
+  const maxLoops = 200; // safety cap
+  while (state.xp >= state.xpToNext && loops < maxLoops) {
+    const beforeInfo = levelToRealmStage(state.level);
+    levelUp({ free: true, fromPill: true });
+    loops += 1;
+    const afterInfo = levelToRealmStage(state.level);
+    if (afterInfo.realm !== beforeInfo.realm) break;
+  }
+  // 刷新 xpToNext，但保留溢出 xp（以支持下一次修行/丹药的自然结算）
+  clampXp({ allowOverflow: true });
+  return loops;
+}
+
 function consumeCultivatePill(realm, source = '服用') {
   const cfg = CULTIVATE_ELIXIR[realm];
   if (!cfg) return false;
   state.cultivateElixirUses[realm] = state.cultivateElixirUses[realm] || 0;
   const count = state.cultivateElixirUses[realm];
   const decay = 0.9 ** count;
-  const gain = cfg.add_exp * decay;
+  const gain = Math.floor(cfg.add_exp * decay);
   state.cultivateElixirUses[realm] += 1;
   state.xp += gain;
-  clampXp();
+
+  // 丹药允许 xp 溢出，以便链式突破
+  clampXp({ allowOverflow: true });
+
   addMajor(`${source}${realm}修炼丹，修为精进${gain.toFixed(0)}点`);
   addDetail('修行', { type: 'xp', amount: gain });
-  maybeTriggerBreakthrough();
+
+  applyCultivateElixirBreakthrough();
   return true;
 }
+
 
 function purchaseLongevityPill(tier, { stash = false, reason = '' } = {}) {
   const pill = LONGEVITY_ELIXIRS[tier];
@@ -1052,9 +1593,6 @@ function purchaseCultivatePill(realm, { stash = false, reason = '' } = {}) {
   if (!cfg) return false;
   const price = cfg.price_ls;
   if (state.spiritStones < price) return false;
-  const costAfter = state.spiritStones - price;
-  const needBreak = stonesRequired(state.level);
-  if (!stash && costAfter < needBreak) return false;
   state.spiritStones -= price;
   const intro = reason ? `${reason}，` : '';
   if (stash) {
@@ -1066,43 +1604,278 @@ function purchaseCultivatePill(realm, { stash = false, reason = '' } = {}) {
   return true;
 }
 
-function maybeBuyLongevityPill() {
-  if (!state.pillMerchantKnown) return false;
+
+function bestLongevityOption() {
+  if (!state.pillMerchantKnown) return null;
+
   const remain = remainingYears();
-  if (!Number.isFinite(remain) || remain > 15) return false;
+  if (!Number.isFinite(remain) || remain <= 0) return null;
+
+  const mode = state.planMode || '冲境界';
+  const { realm } = levelToRealmStage(state.level);
   const tiers = ['large', 'medium', 'small'];
-  const choice = tiers.find((tier) => canUseLongevityPill(tier) && state.spiritStones >= LONGEVITY_ELIXIRS[tier].price);
-  if (!choice) return false;
-  const reason = remain <= 5 ? '寿元将尽' : '担心来不及冲击更高境界';
-  return purchaseLongevityPill(choice, { stash: state.planMode === '打工攒积累', reason });
+
+  // === 情况一：打工攒积累 —— 用 ROI 判定是否值得买延寿丹 ===
+  if (mode === '打工攒积累') {
+    // 寿命非常宽裕时，就没必要买延寿丹了
+    if (remain > 20) return null;
+
+    let targetWorkRealm = state.planWorkTargetRealm || realm;
+    const curIdx = realmOrder.indexOf(realm);
+    const tgtIdx = realmOrder.indexOf(targetWorkRealm);
+    if (tgtIdx > curIdx) {
+      // 尚未到达目标打工境界：此阶段优先把灵石留给突破/修炼丹，不购买封存用的延寿丹
+      return null;
+    }
+    let stonesPerYear = stonesPerYearForRealm(targetWorkRealm);
+    if (!Number.isFinite(stonesPerYear) || stonesPerYear <= 0) {
+      stonesPerYear = stonesPerYearForRealm(realm);
+    }
+    if (!Number.isFinite(stonesPerYear) || stonesPerYear <= 0) return null;
+
+    let best = null;
+    tiers.forEach((tier) => {
+      const pill = LONGEVITY_ELIXIRS[tier];
+      if (!pill) return;
+      if (!canUseLongevityPill(tier)) return;
+      if (state.spiritStones < pill.price) return;
+
+      const extraYears = pill.bonus;
+      // 把延长出来的寿命全部看成用来打工，乘上一个折扣
+      const extraStones = extraYears * stonesPerYear * 0.7;
+      const netBenefit = extraStones - pill.price;
+      if (!Number.isFinite(netBenefit) || netBenefit <= 0) return;
+
+      const value = netBenefit / pill.price;
+      if (!best || value > best.value) {
+        best = { tier, pill, value };
+      }
+    });
+
+    if (!best) return null;
+    const reason = remain <= 5 ? '寿元将尽' : '想延长打工时间';
+    return {
+      value: best.value,
+      name: best.pill.name,
+      buy: () =>
+        purchaseLongevityPill(best.tier, {
+          // 打工攒积累：默认是给后世囤着
+          stash: true,
+          reason,
+        }),
+    };
+  }
+
+  // === 情况二：冲境界 / 修炼取宝等 —— 不按打工 ROI 来卡延寿丹 ===
+  // 这里只在寿元已经「明显紧张」时才考虑买
+  if (remain > 15) return null;
+
+  const candidates = tiers
+    .filter((tier) => canUseLongevityPill(tier) && state.spiritStones >= LONGEVITY_ELIXIRS[tier].price)
+    .map((tier) => {
+      const pill = LONGEVITY_ELIXIRS[tier];
+      return {
+        tier,
+        pill,
+        value: pill.bonus / pill.price, // 单位价格能多续多少年
+      };
+    });
+
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.value - a.value);
+  const chosen = candidates[0];
+  const reason = remain <= 5 ? '寿元将尽' : '担心寿元不足以冲击更高境界';
+
+  return {
+    value: chosen.value,
+    name: chosen.pill.name,
+    buy: () =>
+      purchaseLongevityPill(chosen.tier, {
+        stash: false,
+        reason,
+      }),
+  };
 }
 
-function maybeBuyCultivationPill() {
-  if (!state.pillMerchantKnown) return false;
+
+
+function bestCultivateOption() {
+  if (!state.pillMerchantKnown) return null;
+
   const { realm } = levelToRealmStage(state.level);
   const cfg = CULTIVATE_ELIXIR[realm];
-  if (!cfg) return false;
-  if (state.planMode === '打工攒积累' && totalStoneWealth().total < cfg.price_ls * 3) return false;
+  if (!cfg) return null;
+
+  const mode = state.planMode || '冲境界';
+
+  // 1）若历史最高境界远超当前境界，则不再在练气期乱吃修炼丹（但其它境界允许）
+  const peakLevel = state.knownMaxLevel || state.level;
+  const peakInfo = levelToRealmStage(peakLevel);
+  const peakRealm = peakInfo.realm;
+  const peakIndex = realmOrder.indexOf(peakRealm);
+  const curIndex = realmOrder.indexOf(realm);
+
+  const targetWorkRealm = state.planWorkTargetRealm || realm;
+  const targetIndex = realmOrder.indexOf(targetWorkRealm);
+  const inWorkUpgrade = mode === '打工攒积累' && targetIndex > curIndex;
+
+  if (realm === '练气' && peakIndex - curIndex >= 1 && !inWorkUpgrade) {
+    // 历史已经稳定在更高大境界，这一世练气阶段就不要再浪费修炼丹
+    return null;
+  }
+
+  const remainYears = remainingYears();
+  if (!Number.isFinite(remainYears) || remainYears <= 0) return null;
+
+  // 寿命非常宽裕时，整体不吃修炼丹（慢慢修即可）—— 通用规则
+  if (remainYears > 20 && !inWorkUpgrade) return null;
+
+  // 当前层到下一层的修为缺口
   const xpNeed = Math.max(0, state.xpToNext - state.xp);
-  if (xpNeed <= 0) return false;
+  if (xpNeed <= 0) return null;
+
   const uses = state.cultivateElixirUses[realm] || 0;
-  const gain = cfg.add_exp * 0.9 ** uses;
-  if (gain < xpNeed * 0.25) return false;
-  return purchaseCultivatePill(realm, { stash: false, reason: '以丹助修' });
+  const gain = cfg.add_exp * Math.pow(0.9, uses);
+  if (gain <= 0) return null;
+
+  const basePerDay = REALM_CULTIVATE_GAIN[realm] || REALM_CULTIVATE_GAIN['练气'];
+  const xpPerYear = basePerDay * DAYS_PER_YEAR * 0.9 * 0.7; // 与 estimateAffordableLevel 中保持一致
+  if (xpPerYear <= 0) return null;
+
+  const timeSavedYears = gain / xpPerYear;
+  if (!Number.isFinite(timeSavedYears) || timeSavedYears <= 0) return null;
+
+  if (mode === '打工攒积累') {
+    if (!inWorkUpgrade) return null;
+
+    // === 打工模式：用 ROI 判定 ===
+    let targetWorkRealm = state.planWorkTargetRealm || realm;
+    let stonesPerYear = stonesPerYearForRealm(targetWorkRealm);
+    if (!Number.isFinite(stonesPerYear) || stonesPerYear <= 0) {
+      stonesPerYear = stonesPerYearForRealm(realm);
+    }
+    if (!Number.isFinite(stonesPerYear) || stonesPerYear <= 0) return null;
+
+    const extraStones = timeSavedYears * stonesPerYear * 0.7;
+    const netBenefit = extraStones - cfg.price_ls;
+    if (!Number.isFinite(netBenefit) || netBenefit <= 0) return null;
+
+    return {
+      value: netBenefit / cfg.price_ls,
+      name: `${realm}修炼丹`,
+      buy: () => purchaseCultivatePill(realm, { stash: false, reason: '以丹换取更多打工时间' }),
+    };
+  }
+
+  // === 非打工模式（冲境界 / 修炼取宝等）：先看“纯修炼+寿元”是否够用 ===
+  const naturalYearsNeeded = xpNeed / xpPerYear;
+  if (naturalYearsNeeded <= remainYears) {
+    // 单靠本世剩余寿元就能把这一层修满，不需要额外吃修炼丹
+    return null;
+  }
+
+  // 纯修炼来不及，这时才考虑修炼丹帮助突破
+  const ratio = xpNeed > 0 ? gain / xpNeed : 0;
+  // 若作用极小且缺口本身也不大，就算了
+  if (ratio <= 0.05 && xpNeed < gain * 2) {
+    return null;
+  }
+
+  return {
+    value: ratio, // 表示对当前层突破帮助的比例
+    name: `${realm}修炼丹`,
+    buy: () => purchaseCultivatePill(realm, { stash: false, reason: '以丹助突破' }),
+  };
 }
 
+
+
+
 function maybeHandleElixirs() {
+  // 先尝试解锁丹药商人
   maybeDiscoverPillMerchant();
-  const boughtLongevity = maybeBuyLongevityPill();
-  const boughtCultivate = maybeBuyCultivationPill();
-  if (testMode && (boughtLongevity || boughtCultivate)) {
-    const buys = [boughtLongevity ? '延寿丹' : null, boughtCultivate ? '修炼丹' : null].filter(Boolean).join('、');
-    pushTestInfo(`丹药购买：${buys}`);
+  if (!state.pillMerchantKnown) return;
+
+  const longevity = bestLongevityOption();
+  const cultivate = bestCultivateOption();
+  if (!longevity && !cultivate) return;
+
+  // 根据当前的长期规划（planMode）和本世状态决定到底买不买、买哪一种
+  function pickByPlan(lonOpt, culOpt) {
+    const mode = state.planMode || '冲境界';
+    const remain = remainingYears();
+    const { realm } = levelToRealmStage(state.level);
+    const targetRealm = state.planWorkTargetRealm || realm;
+
+    let candidate = null;
+
+    if (mode === '冲境界') {
+      // 冲境界策略：优先考虑修炼丹，用来加快突破进度
+      if (culOpt) {
+        candidate = culOpt;
+      }
+      // 当寿命偏紧时，允许使用延寿丹给冲境界“续命”
+      if (!candidate && lonOpt && remain <= 10) {
+        candidate = lonOpt;
+      }
+    } else if (mode === '打工攒积累') {
+      // 打工策略：优先考虑延寿丹，拉长打工时间
+      if (lonOpt) {
+        candidate = lonOpt;
+      }
+      // 只有当目标打工境界高于当前境界时，才考虑少量修炼丹帮助升到更高境界打工
+      if (!candidate && culOpt) {
+        const curIdx = realmOrder.indexOf(realm);
+        const tgtIdx = realmOrder.indexOf(targetRealm);
+        if (tgtIdx > curIdx) {
+          candidate = culOpt;
+        }
+      }
+    } else if (mode === '修炼取宝') {
+      // 取宝阶段偏保守：只在寿命非常紧张时才用延寿丹
+      if (lonOpt && remain <= 5) {
+        candidate = lonOpt;
+      }
+    } else {
+      // 兜底：按收益排序
+      const list = [lonOpt, culOpt].filter(Boolean);
+      if (list.length) {
+        list.sort((a, b) => b.value - a.value);
+        candidate = list[0];
+      }
+    }
+
+    // 战斗、濒死等特殊状态下，不额外插入吃药决策，避免打断关键流程
+    if (candidate && (state.activity === '战斗' || state.activity === '濒死')) {
+      return null;
+    }
+
+    return candidate;
   }
+
+  const chosen = pickByPlan(longevity, cultivate);
+  if (!chosen) return;
+
+  const bought = chosen.buy();
+  if (testMode && bought) {
+    pushTestInfo(`丹药购买：${chosen.name}（策略：${state.planMode}）`);
+  }
+}
+
+function shouldDeferStashUntilWorkRealm() {
+  if (state.planMode !== '打工攒积累') return false;
+  const targetRealm = state.planWorkTargetRealm;
+  if (!targetRealm) return false;
+  const curRealm = levelToRealmStage(state.level).realm;
+  const curIdx = realmOrder.indexOf(curRealm);
+  const tgtIdx = realmOrder.indexOf(targetRealm);
+  if (curIdx < 0 || tgtIdx < 0) return false;
+  return tgtIdx > curIdx;
 }
 
 function maybeFirstLifeStash() {
   if (state.reincarnation !== 0 || state.firstLifeStashSettled) return;
+  if (shouldDeferStashUntilWorkRealm()) return;
   const chance = Math.random();
   if (chance > 0.05) {
     state.firstLifeStashSettled = true;
@@ -1125,6 +1898,7 @@ function maybeFirstLifeStash() {
 
 function maybeAccumulateStash() {
   if (state.planMode !== '打工攒积累') return;
+  if (shouldDeferStashUntilWorkRealm()) return;
   const realm = levelToRealmStage(state.level).realm;
   const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
   const target = cfg.reward[1] * DAYS_PER_YEAR;
@@ -1143,7 +1917,7 @@ function maybeAccumulateStash() {
 
 function maybePrepareFinalStash(force = false) {
   if (state.reincarnation < 1) return;
-  if (state.planMode !== '打工攒积累') return;
+  if (!force && state.planMode !== '打工攒积累') return;
   if (state.finalLegacyPrepared) return;
   const monthThreshold = DAYS_PER_MONTH / DAYS_PER_YEAR;
   if (!force && remainingYears() > monthThreshold) return;
@@ -1166,77 +1940,365 @@ function maybePrepareFinalStash(force = false) {
   }
 }
 
+
 function estimateAffordableLevel(totalStones) {
-  let level = state.level;
-  let stones = totalStones;
-  while (level < TOTAL_PRE_LEVELS + 1) {
-    const cost = stonesRequired(level);
-    if (!cost || stones < cost) break;
-    stones -= cost;
-    level += 1;
+  // 估算：在本世剩余寿元内，结合自然修炼 + 修炼丹 + 延寿丹，
+  // 在修为、灵石和寿元三重约束下，最多能推到的层数（只管冲境界，不看打工收益）。
+  ensureLifespan();
+
+  let lifeYears = remainingYears();
+  if (!Number.isFinite(lifeYears) || lifeYears <= 0) {
+    return state.level;
   }
+
+  // 给个上限，避免飞升之后无限寿元把循环拖爆
+  const SAFETY_CAP_YEARS = 10000;
+  if (lifeYears > SAFETY_CAP_YEARS) lifeYears = SAFETY_CAP_YEARS;
+
+  const avgFactor = 0.9;      // 心境/随机事件平均折扣
+  const cultivateRatio = 0.7; // 假定大概 70% 的时间在修炼（比之前 0.5 更积极一点）
+
+  // 本地模拟用的计数，不改动真实状态
+  let stones = Math.max(0, totalStones || 0);
+  let level = state.level;
+  let firstLevel = true;
+  let initialXp = state.xp || 0;
+
+  let usesMap = Object.assign({}, state.cultivateElixirUses || {});
+  let longevityUsed = Object.assign({}, state.longevityConsumed || {});
+  let appliedRealms = Object.assign({}, state.lifespanApplied || {});
+
+  function realmRank(realm) {
+    return realmOrder.indexOf(realm);
+  }
+
+  function canUseLongevitySim(tier, realm) {
+    const pill = LONGEVITY_ELIXIRS[tier];
+    if (!pill) return false;
+    if (pill.maxRealm && realmRank(realm) > realmRank(pill.maxRealm)) return false;
+    const used = longevityUsed[tier] || 0;
+    if (used >= pill.maxCount) return false;
+    return true;
+  }
+
+  function gainPerYearForRealm(realm) {
+    const base = REALM_CULTIVATE_GAIN[realm] || REALM_CULTIVATE_GAIN['练气'];
+    const artifactBoost = 1 + (artifactBonus ? artifactBonus('xpBoost') : 0);
+    return base * DAYS_PER_YEAR * avgFactor * cultivateRatio * artifactBoost;
+  }
+
+  let guard = 0;
+  while (level < TOTAL_PRE_LEVELS + 1 && lifeYears > 0 && guard < 2000) {
+    guard += 1;
+    const info = levelToRealmStage(level);
+    const realm = info.realm;
+    let xpCost = requiredXp(level);
+    const stoneCost = stonesRequired(level);
+
+    if (!stoneCost || stoneCost <= 0 || stones < stoneCost) {
+      break; // 灵石不够突破，推演到此结束
+    }
+
+    // 第一层要减去当前已经积累的修为
+    if (firstLevel) {
+      xpCost = Math.max(0, xpCost - initialXp);
+      firstLevel = false;
+    }
+
+    // 不需要额外修为（当前 xp 已足够），只要花灵石就能上去
+    if (xpCost <= 0) {
+      stones -= stoneCost;
+      level += 1;
+
+      // 看看是不是刚迈入新大境界，补寿元
+      const nextInfo = levelToRealmStage(level);
+      if (nextInfo.stage === 1) {
+        const r = nextInfo.realm;
+        if (!appliedRealms[r]) {
+          const bonusYears = LONGEVITY_REALM_BONUS[r];
+          if (Number.isFinite(bonusYears) && bonusYears > 0) {
+            lifeYears += bonusYears;
+          } else if (!Number.isFinite(bonusYears)) {
+            lifeYears = SAFETY_CAP_YEARS;
+          }
+          appliedRealms[r] = true;
+        }
+      }
+      continue;
+    }
+
+    const xpPerYear = gainPerYearForRealm(realm);
+    if (!Number.isFinite(xpPerYear) || xpPerYear <= 0) {
+      break;
+    }
+
+    // 本层局部模拟：在当前 realm，允许买修炼丹和延寿丹，看能不能凑够 xpCost
+    let lifeYearsSim = lifeYears;
+    let stonesSim = stones - stoneCost; // 预留本层突破灵石，避免丹药把突破费吃掉
+    let usesSim = Object.assign({}, usesMap);
+    let longevitySim = Object.assign({}, longevityUsed);
+
+    let xpPill = 0; // 修炼丹直接给的总修为
+    let xpNatMax = xpPerYear * lifeYearsSim;
+    let xpTotalMax = xpNatMax + xpPill;
+    let pillGuard = 0;
+
+    while (xpTotalMax < xpCost && stonesSim > 0 && pillGuard < 200) {
+      pillGuard += 1;
+      let best = null;
+
+      // 候选 1：当前境界修炼丹
+      const elixirCfg = CULTIVATE_ELIXIR[realm];
+      if (elixirCfg && elixirCfg.price_ls > 0 && elixirCfg.add_exp > 0 && stonesSim >= elixirCfg.price_ls) {
+        const used = usesSim[realm] || 0;
+        const gain = elixirCfg.add_exp * Math.pow(0.9, used);
+        if (gain > 1) {
+          const ratio = gain / elixirCfg.price_ls;
+          best = { kind: 'cultivate', gain, cost: elixirCfg.price_ls, realm, ratio };
+        }
+      }
+
+      // 候选 2：各档延寿丹（把 bonus 年寿命全部用来修炼）
+      Object.keys(LONGEVITY_ELIXIRS).forEach((tier) => {
+        const pill = LONGEVITY_ELIXIRS[tier];
+        if (!pill || pill.price <= 0) return;
+        if (!canUseLongevitySim(tier, realm)) return;
+        if (stonesSim < pill.price) return;
+        const gain = xpPerYear * pill.bonus;
+        if (gain <= 1) return;
+        const ratio = gain / pill.price;
+        if (!best || ratio > best.ratio) {
+          best = { kind: 'longevity', gain, cost: pill.price, tier, bonus: pill.bonus, ratio };
+        }
+      });
+
+      if (!best) {
+        break; // 没有任何值得买/买得起的丹药了
+      }
+
+      // 应用「最划算」的一颗
+      stonesSim -= best.cost;
+      if (best.kind === 'cultivate') {
+        xpPill += best.gain;
+        usesSim[realm] = (usesSim[realm] || 0) + 1;
+      } else {
+        lifeYearsSim += best.bonus;
+        longevitySim[best.tier] = (longevitySim[best.tier] || 0) + 1;
+      }
+
+      xpNatMax = xpPerYear * lifeYearsSim;
+      xpTotalMax = xpNatMax + xpPill;
+    }
+
+    // 即便把能买的丹都算上，依然凑不齐本层修为需求，就打住
+    if (xpTotalMax < xpCost) {
+      break;
+    }
+
+    // 把局部模拟结果提交回全局：
+    // 1）自然修炼部分：只用掉刚好补足缺口的那部分
+    const xpNatNeeded = Math.max(0, Math.min(xpPerYear * lifeYearsSim, xpCost - xpPill));
+    const timeUsedYears = xpNatNeeded / xpPerYear;
+    lifeYears = Math.max(0, lifeYearsSim - timeUsedYears);
+
+    // 2）修炼丹/延寿丹的消耗记录同步回全局
+    stones = stonesSim;
+    usesMap = usesSim;
+    longevityUsed = longevitySim;
+
+    // 3）支付突破的灵石：本层开始时已预留 stoneCost，因此此处无需再次扣减
+    level += 1;
+
+    // 4）如果刚进入新的大境界第一层，叠加该境界自带的寿元奖励
+    const nextInfo2 = levelToRealmStage(level);
+    if (nextInfo2.stage === 1) {
+      const r2 = nextInfo2.realm;
+      if (!appliedRealms[r2]) {
+        const bonusYears2 = LONGEVITY_REALM_BONUS[r2];
+        if (Number.isFinite(bonusYears2) && bonusYears2 > 0) {
+          lifeYears += bonusYears2;
+        } else if (!Number.isFinite(bonusYears2)) {
+          lifeYears = SAFETY_CAP_YEARS;
+        }
+        appliedRealms[r2] = true;
+      }
+    }
+  }
+
   return level;
 }
 
+
+function accessibleWealth() {
+  const { realm, stage } = levelToRealmStage(state.level);
+  const stash = realm === '练气' && stage < 5 ? 0 : stashStoneSum();
+  return state.spiritStones + stash;
+}
+
 function updatePlanMode() {
+  if (SIMULATION_MODE) return;
+  const life = currentLife();
   const pending = pendingStashes();
+
+  // 每次重判都刷新诊断信息
+  state.planDiag = '';
+  state.planExpectationMeta = null;
+
+  // ① 若有前世藏宝未取：优先修炼取宝
   if (pending.length > 0) {
     state.planMode = '修炼取宝';
     state.planReason = '前世秘藏未取，需先稳至练气五层再议。';
     state.planExpectationLevel = state.planExpectationLevel || state.knownMaxLevel || state.level;
-    return;
-  }
-  const realm = levelToRealmStage(state.level).realm;
-  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
-  const maxWorkReward = cfg.reward[1];
-  const wealthInfo = totalStoneWealth();
-  const wealth = wealthInfo.total;
-  const lifeNo = (state.reincarnation || 0) + 1;
-  const peakLevel = state.knownMaxLevel || state.level;
-  const peakRepeats = levelRepeatCount(peakLevel);
-  const lastPeak = state.lastLifePeak || peakLevel;
-  const plateau = lifeNo >= 3 && peakRepeats >= Math.max(3, lifeNo);
-  const regression = lifeNo > 1 && lastPeak < peakLevel;
-  const savingTarget = maxWorkReward * 365;
-  const predicted = estimateAffordableLevel(wealth);
-  state.planExpectationLevel = predicted;
-  const canSurpassKnown = predicted > peakLevel;
-  const abundance = wealth >= savingTarget * 2;
-
-  if (canSurpassKnown || abundance) {
-    state.planMode = '冲境界';
-    state.planReason = canSurpassKnown
-      ? `推演可至${formatLevel(predicted)}，有望超越已知巅峰${formatLevel(peakLevel)}。`
-      : '储备丰厚，不必先行打工。';
+    state.planDiag = `取宝阶段：待取藏宝${pending.length}处，暂不推演。`;
     return;
   }
 
-  if ((plateau || regression) && wealth < savingTarget * 2) {
-    state.planMode = '打工攒积累';
-    state.planReason = '前路受阻且积蓄不足，选择静待积累。';
-  } else if (lifeNo > 1 && wealth > savingTarget) {
-    state.planMode = '冲境界';
-    state.planReason = '跨世积累尚可，先试冲击旧巅峰。';
+  // ② 同口径仿真：以冲境界为主，本世可达上限（缓存，避免频繁推演）
+  const cap = evaluateBreakthroughCap();
+  if (cap && Number.isFinite(cap.maxLevel) && cap.maxLevel > 0) {
+    state.planExpectationLevel = cap.maxLevel;
+    state.planExpectationMeta = cap;
+    state.planDiag = `冲境界仿真：可达${formatLevel(cap.maxLevel)}，寿元约${cap.lifeYears.toFixed(
+      1
+    )}年，净收益约${Math.round(cap.netCarry)}灵石（现金）/ 折算约${Math.round(
+      cap.netCarryValued
+    )}灵石（含丹药折价），止于${cap.stopReason}。`
+    + `（condition=${cap.endCondition}，lifeDays=${cap.endLifeDays}，totalDays=${cap.endTotalDays}，realm=${cap.endRealm}）`;
   } else {
-    state.planMode = '冲境界';
-    state.planReason = '正常修行推进境界。';
+    // 兜底：快速估算（理论上不应频繁触发）
+    const wealth = accessibleWealth();
+    const predicted = estimateAffordableLevel(wealth);
+    if (Number.isFinite(predicted) && predicted > 0) {
+      state.planExpectationLevel = predicted;
+    } else {
+      state.planExpectationLevel =
+        state.planExpectationLevel || state.knownMaxLevel || state.level;
+    }
+    state.planDiag = '冲境界仿真异常：回退为快速估算。';
   }
+
+  // ③ 算出「已知最高境界」以及「最大境界+1」
+  const peakLevel = state.knownMaxLevel || state.level;
+  const peakInfo = levelToRealmStage(peakLevel);
+  const peakRealm = peakInfo.realm;
+  const peakIndex = realmOrder.indexOf(peakRealm);
+
+  let nextRealm = null;
+  if (peakRealm === '飞升') {
+    nextRealm = '仙';
+  } else if (peakIndex >= 0 && peakIndex < realmOrder.length - 1) {
+    nextRealm = realmOrder[peakIndex + 1];
+  }
+
+  const predictedInfo = levelToRealmStage(state.planExpectationLevel || state.level);
+  // 注意：realmOrder 不包含「仙」，但 levelToRealmStage 可能返回 realm='仙'
+  let predictedRealmIndex = realmOrder.indexOf(predictedInfo.realm);
+  if (predictedInfo.realm === '仙') predictedRealmIndex = realmOrder.length;
+
+  // 「能否迈入最大境界+1」判断：
+  // 只要推演结果已经能“摸到” nextRealm（哪怕是第1层），就认为有资格一搏
+  // 注意边界：若推演结果直接跨过 nextRealm（例如预测可达「结丹」，nextRealm 为「筑基」），
+  // 也应视为“能迈入 nextRealm”，否则会出现“越有钱反而越不冲”的反直觉。
+  let canReachNextRealm = false;
+  if (nextRealm && peakIndex >= 0) {
+    if (predictedRealmIndex >= peakIndex + 1) {
+      canReachNextRealm = true;
+    }
+  }
+
+  state.canReachNextRealm = !!canReachNextRealm;
+  state.nextRealmHint = nextRealm || '';
+
+  // ④ 若确实有希望迈入“最大境界+1”，优先冲境界
+  if (canReachNextRealm && nextRealm) {
+    state.planMode = '冲境界';
+    state.planReason = `仿真可至${formatLevel(
+      state.planExpectationLevel
+    )}，本世有望从${peakRealm}迈入${nextRealm}。`;
+    return;
+  }
+
+  // ⑤ 本世难以迈入更高大境界：使用「最佳打工方案」
+  const bestPlan = evaluateBestWorkPlan();
+  const workDiag = state.workPlanDiag || '';
+  if (workDiag) {
+    state.planDiag = `${state.planDiag} 打工仿真：${workDiag}`;
+  }
+
+  if (bestPlan) {
+    state.planMode = '打工攒积累';
+    state.planWorkTargetRealm = bestPlan.realm;
+    state.planWorkSummary = bestPlan;
+
+    const approxGain =
+      Number.isFinite(bestPlan.netStones) && bestPlan.netStones > 0
+        ? `约${Math.round(bestPlan.netStones)}灵石（净）`
+        : Number.isFinite(bestPlan.totalStones) && bestPlan.totalStones > 0
+          ? `约${Math.round(bestPlan.totalStones)}灵石（毛）`
+          : '较高灵石收益';
+
+    const candidateRealms = peakIndex >= 0 ? realmOrder.slice(0, peakIndex + 1) : realmOrder.slice();
+    const comparedRealms = [];
+    for (const r of candidateRealms) {
+      const p = evaluateWorkPlanForRealm(r);
+      if (p) comparedRealms.push(r);
+    }
+    const compareText = comparedRealms.length ? `对比「${comparedRealms.join('」「')}」等方案后` : '推演多种方案后';
+
+    if (bestPlan.realm === peakRealm) {
+      state.planReason = `本世难以迈入${nextRealm || '更高境界'}，${compareText}，在「${
+        bestPlan.realm
+      }」境界先行突破再专注打工终世收益最高（${approxGain}）。`;
+    } else {
+      state.planReason = `本世难以迈入${nextRealm || '更高境界'}，${compareText}，在「${
+        bestPlan.realm
+      }」境界专注打工终世收益最高（${approxGain}）。`;
+    }
+    return;
+  }
+
+  // ⑥ 极端 fallback：还是以冲境界为主
+  state.planMode = '冲境界';
+  state.planReason = '以冲境界为主，打工随缘。';
 }
+
+
 
 function shouldAccumulateWork() {
+  // 仅在「打工攒积累」策略下才会进入长期打工
   if (state.planMode !== '打工攒积累') return false;
-  const realm = levelToRealmStage(state.level).realm;
-  const cfg = WORK_CONFIG[realm] || WORK_CONFIG['练气'];
-  const maxWorkReward = cfg.reward[1];
-  const wealth = totalStoneWealth().total;
-  const savingTarget = maxWorkReward * 365;
-  const belowSavings = wealth < savingTarget;
-  const abundance = wealth >= savingTarget * 2;
-  const lifeNo = (state.reincarnation || 0) + 1;
-  const laggingBehind = lifeNo > 1 && state.bestLevelThisLife < (state.knownMaxLevel || 1);
-  if (abundance) return false;
-  return belowSavings || laggingBehind;
+
+  const info = levelToRealmStage(state.level);
+  const currentRealm = info.realm;
+  const stage = info.stage;
+  const targetRealm = state.planWorkTargetRealm || currentRealm;
+
+  const curIndex = realmOrder.indexOf(currentRealm);
+  const tgtIndex = realmOrder.indexOf(targetRealm);
+
+  // 若尚未达到「规划的打工大境界」，不进入长期打工（只允许临时打工补突破用灵石）
+  if (tgtIndex >= 0 && curIndex < tgtIndex) {
+    return false;
+  }
+
+  // 特殊规则：若规划在「练气」打工：
+  // - 若存在前世未开启的藏宝，则先修到练气五层触发取宝，再进入长期打工；
+  // - 若没有任何待取藏宝，则允许从练气一层直接长期打工（用于“摆烂存钱”策略）。
+  if (targetRealm === '练气' && currentRealm === '练气' && stage < 5) {
+    try {
+      if (typeof pendingStashes === 'function' && pendingStashes().length > 0) {
+        return false;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 一旦达到（或超过）目标打工大境界，就始终视为应该长期打工，
+  // 不再因为“资产已经够多”而中途停手。
+  return true;
 }
+
 
 function rollBaseLifespan() {
   if (Math.random() < LONGEVITY_MAX_ROLL) return 100;
@@ -1253,7 +2315,8 @@ function ensureLifespan() {
 
 function remainingYears() {
   const ageYears = Math.floor(state.lifeDays / DAYS_PER_YEAR);
-  return (state.lifespanYears || 0) - ageYears;
+  const effectiveAge = Math.max(0, ageYears - START_AGE_YEARS);
+  return (state.lifespanYears || 0) - effectiveAge;
 }
 
 function applyLongevity(realm) {
@@ -1282,7 +2345,7 @@ function applyLongevity(realm) {
 function checkLifespanWarnings() {
   ensureLifespan();
   if (!Number.isFinite(state.lifespanYears)) return;
-  const ageYears = Math.floor(state.lifeDays / DAYS_PER_YEAR);
+  const ageYears = Math.max(0, Math.floor(state.lifeDays / DAYS_PER_YEAR) - START_AGE_YEARS);
   const remain = state.lifespanYears - ageYears;
   if (state.reincarnation === 0 && !state.lifespanWarned.finalYear && remain <= 1) {
     addMajor('模糊感知寿元将尽，也许只剩一年。');
@@ -1451,6 +2514,7 @@ function handleArtifactClick(e) {
 }
 
 function addAutoLogEntry(action) {
+  if (SIMULATION_MODE) return;
   const day = Math.floor(state.totalDays);
   const last = latestLogEntry;
   if (last && last.action === action && !last.locked) {
@@ -1469,12 +2533,14 @@ function addAutoLogEntry(action) {
 }
 
 function addDetail(action, detail) {
+  if (SIMULATION_MODE) return;
   const entry = addAutoLogEntry(action);
   entry.details.push(detail);
   logsDirty = true;
 }
 
 function addMoodEvent(action, text) {
+  if (SIMULATION_MODE) return;
   const entry = addAutoLogEntry(action);
   entry.events.push(text);
   entry.locked = true;
@@ -1482,6 +2548,7 @@ function addMoodEvent(action, text) {
 }
 
 function addMajor(text) {
+  if (SIMULATION_MODE) return;
   state.majorLogs.push({ day: Math.floor(state.totalDays), text });
   const entry = {
     startDay: Math.floor(state.totalDays),
@@ -1499,6 +2566,7 @@ function addMajor(text) {
 }
 
 function saveState() {
+  if (SIMULATION_MODE) return;
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
@@ -1547,6 +2615,7 @@ function loadState() {
       if (!state.planMode) state.planMode = '冲境界';
       if (!state.planReason) state.planReason = '初始设定：以突破为先。';
       if (!state.planExpectationLevel) state.planExpectationLevel = state.knownMaxLevel || state.level;
+      if (typeof state.planLockedLife !== 'number') state.planLockedLife = null;
       if (!state.knownMaxLevel || state.knownMaxLevel < state.level) {
         state.knownMaxLevel = state.level;
       }
@@ -1601,11 +2670,19 @@ function loadState() {
   }
 }
 
-function clampXp() {
+function clampXp({ allowOverflow = false } = {}) {
   state.xpToNext = requiredXp(state.level);
   const maxXp = Math.max(state.xpToNext, 1);
-  state.xp = Math.min(Math.max(0, state.xp), maxXp);
+  // 大多数情况下，xp 不允许溢出（保持 UI 与行为简单）
+  // 修炼丹则需要允许溢出，以支持「一次丹药可连破多层」的链式突破结算。
+  state.xp = Math.floor(Number(state.xp) || 0);
+  if (allowOverflow) {
+    state.xp = Math.max(0, state.xp);
+  } else {
+    state.xp = Math.min(Math.max(0, state.xp), maxXp);
+  }
 }
+
 
 function updateUI() {
   state.xp = Math.max(0, state.xp);
@@ -1659,16 +2736,19 @@ function aiInsights() {
   const highest = formatLevel(state.knownMaxLevel || state.level);
   const remain = remainingYears();
   const remainText = Number.isFinite(state.lifespanYears) ? `${Math.max(0, Math.floor(remain))}年` : '无上限';
-  const stashInfo = `${(state.stashes || []).length}处藏宝`;
+  const stashInfo = `${pendingStashes().length}处藏宝`;
   const wealth = totalStoneWealth();
   const resourceLine = `灵石${wealth.total.toFixed(0)}（身上${wealth.carried.toFixed(0)}，藏${wealth.stash.toFixed(0)}），灵宝${state.artifacts.length}`;
   const expectation = formatLevel(state.planExpectationLevel || state.knownMaxLevel || state.level);
+  const diagLine = state.planDiag ? `诊断：${state.planDiag}` : '';
   return [
     `轻智能：第${lifeNo}世 · 策略：${state.planMode} · 已知最高：${highest}`,
     `寿元预估：${remainText} · 资源：${resourceLine} · 藏宝：${stashInfo}`,
-    `策略依据：预估可冲至${expectation}，因：${state.planReason}`,
+    `策略依据：仿真可冲至${expectation}，因：${state.planReason}`,
+    ...(diagLine ? [diagLine] : []),
   ];
 }
+
 
 function renderTestInfo() {
   if (!ui.testInfo) return;
@@ -1684,6 +2764,7 @@ function renderTestInfo() {
 }
 
 function pushTestInfo(text) {
+  if (SIMULATION_MODE) return;
   const now = Date.now();
   const stamp = new Date(now).toLocaleTimeString();
   testMessages.push({ text, ts: now, stamp });
@@ -1925,28 +3006,48 @@ function startActivity(name, duration) {
   }
 }
 
-function levelUp() {
+function levelUp({ free = false, fromPill = false } = {}) {
   const cost = stonesRequired(state.level);
-  if (state.spiritStones < cost || state.xp < state.xpToNext) return;
-  state.spiritStones -= cost;
+  if (state.xp < state.xpToNext) return;
+  if (!free && state.spiritStones < cost) return;
+
+
+  const beforeLevel = state.level;
+  const beforeInfo = levelToRealmStage(beforeLevel);
+  const prevKnownMaxLevel = state.knownMaxLevel || beforeLevel;
+  const prevKnownMaxRealm = levelToRealmStage(prevKnownMaxLevel).realm;
+
+  if (!free) state.spiritStones -= cost;
   const spentXp = state.xpToNext;
   state.level += 1;
   registerLevelEntry(state.level);
-  state.knownMaxLevel = Math.max(state.knownMaxLevel || state.level, state.level);
+
+  state.knownMaxLevel = Math.max(prevKnownMaxLevel, state.level);
   state.bestLevelThisLife = Math.max(state.bestLevelThisLife || state.level, state.level);
-  updatePlanMode();
+
+  const afterInfo = levelToRealmStage(state.level);
+  if (afterInfo.stage === 1) {
+    applyLongevity(afterInfo.realm);
+  }
+
   state.xp = Math.max(0, state.xp - spentXp);
   state.xpToNext = requiredXp(state.level);
-  const { realm, stage } = levelToRealmStage(state.level);
-  if (stage === 1) {
-    applyLongevity(realm);
-  }
-  if (state.xp >= state.xpToNext) {
+
+  if (!fromPill && state.xp >= state.xpToNext) {
     state.xp = Math.floor(state.xpToNext * 0.25);
   }
   state.mood = Math.min(state.mood + 10, 100);
   addMajor(`突破至${formatLevel(state.level)}`);
+
+  // 阶段2：练气五层取完前世秘藏后，会在 maybeOpenStashes() 内触发重判
   maybeOpenStashes();
+
+  // 阶段3：仅在首次迈入历史最高的大境界时重判策略，避免每层突破导致策略抖动
+  const enteredNewRealm = afterInfo.realm !== beforeInfo.realm;
+  const reachedNewHighestRealm = realmRank(afterInfo.realm) > realmRank(prevKnownMaxRealm);
+  if (enteredNewRealm && reachedNewHighestRealm) {
+    updatePlanMode();
+  }
 }
 
 function handleCultivation(action) {
@@ -1998,6 +3099,18 @@ function settleWork(reason) {
   state.workPlan = null;
 }
 
+
+function resumePlannedActivity() {
+  // 根据当前世代的整体规划恢复主要活动：
+  // - 若为「打工攒积累」且仍应长期打工，则回到打工；
+  // - 否则默认回到修行。
+  if (state.planMode === '打工攒积累' && typeof shouldAccumulateWork === 'function' && shouldAccumulateWork()) {
+    startActivity('打工', 8);
+  } else {
+    startActivity('修行', 0);
+  }
+}
+
 function handleWork(action) {
   const fatigue = 1.6;
   state.mood = Math.max(5, state.mood - fatigue);
@@ -2013,7 +3126,7 @@ function handleWork(action) {
   if (isComplete) {
     state.activityProgress = Math.min(state.activityProgress, state.activityDuration);
     settleWork();
-    startActivity('修行', 0);
+    resumePlannedActivity();
   }
 }
 
@@ -2022,7 +3135,7 @@ function handleMeditation() {
   state.activityProgress += 1;
 
   if (state.mood >= 75 || state.activityProgress >= state.activityDuration) {
-    startActivity('修行', 0);
+    resumePlannedActivity();
   }
 }
 
@@ -2031,7 +3144,7 @@ function handleHealing() {
   state.healTimer = Math.max(0, state.healTimer - 1);
   if (state.healTimer === 0) {
     state.condition = '正常';
-    startActivity('修行', 0);
+    resumePlannedActivity();
     addMajor('疗伤结束，状态恢复');
   }
 }
@@ -2058,7 +3171,7 @@ function handleBreakthrough() {
     const target = formatLevel(state.level + 1);
     levelUp();
     addDetail('突破', { note: `突破至${target}` });
-    startActivity('修行', 0);
+    resumePlannedActivity();
   }
 }
 
@@ -2357,6 +3470,11 @@ function handleDeath(reason) {
   if (state.artifacts.length) {
     addMajor('身死道消，随身天道灵宝散去');
   }
+  if (SIMULATION_MODE) {
+    state.condition = '死亡';
+    state._simDeathReason = reason;
+    return;
+  }
   const lastLifePeak = state.bestLevelThisLife || state.level;
   state.reincarnation += 1;
   const lifeNo = state.reincarnation + 1;
@@ -2385,6 +3503,7 @@ function handleDeath(reason) {
     workStreak: 0,
     cultivateStreak: 0,
     planMode: keepPlan,
+    planLockedLife: null,
     knownMaxLevel: knownMax,
     condition: '正常',
     healTimer: 0,
@@ -2437,6 +3556,7 @@ function narrateRebirth(sectName, baseDay = 0) {
   const literacyDay = birthDay + 7 * DAYS_PER_YEAR + randRange(-30, 40);
   const awakenDay = birthDay + START_AGE_YEARS * DAYS_PER_YEAR;
   const sectDay = awakenDay + randRange(5, 120);
+  const life = currentLife();
   const timeline = [
     { day: birthDay, text: '出生于凡尘，灵根潜藏' },
     { day: childhoodDay, text: '童年平凡，劳作习武，心性渐成' },
@@ -2448,6 +3568,14 @@ function narrateRebirth(sectName, baseDay = 0) {
   timeline.forEach(({ day, text }) => {
     state.totalDays = day;
     addMajor(text);
+    // 仅在觉醒记忆节点追加自我认知
+    if (day === awakenDay) {
+      if (life === 2) {
+        addMajor('前尘往事如潮水般涌来，你隐约意识到那些并非幻梦，而是自己曾经的真实经历——大概是个重生之人。');
+      } else if (life === 3) {
+        addMajor('数世记忆在心中重叠，你几乎可以肯定：自己死后仍会再度归来，再入轮回。');
+      }
+    }
   });
 
   state.totalDays = sectDay;
@@ -2594,6 +3722,7 @@ function resetAll() {
     workStreak: 0,
     cultivateStreak: 0,
     planMode: '冲境界',
+    planLockedLife: null,
     knownMaxLevel: 1,
     condition: '正常',
     healTimer: 0,
@@ -2776,7 +3905,21 @@ setupEvents();
 
 setInterval(renderTestInfo, 1000);
 setInterval(() => {
-  tickGame(timeScale);
-  pomodoroTick(timeScale);
+  const now = Date.now();
+  let elapsedSec = (now - lastTickRealTime) / 1000;
+  if (!Number.isFinite(elapsedSec) || elapsedSec <= 0) {
+    elapsedSec = 1;
+  }
+  lastTickRealTime = now;
+
+  // 根据真实经过时间推算需要推进的“天数”，这样标签在后台时恢复后会自动补进度
+  const maxDaysPerTick = 36500; // 单次最多补 100 年，避免极端情况下卡死
+  let deltaDays = Math.floor(elapsedSec * timeScale);
+  if (deltaDays < 1) deltaDays = 1;
+  if (deltaDays > maxDaysPerTick) deltaDays = maxDaysPerTick;
+
+  tickGame(deltaDays);
+  // 番茄钟沿用原本设定：随修行节奏 gear 一起加速，这里用真实秒数 * timeScale 来补进度
+  pomodoroTick(elapsedSec * timeScale);
   heartbeat();
 }, 1000);
